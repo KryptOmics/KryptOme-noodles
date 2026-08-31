@@ -308,7 +308,7 @@ impl FeatureSummary {
         self.deleted_length
     }
 
-    pub fn soft_clipped_len(&self) -> usize {
+    pub fn soft_clipped_length(&self) -> usize {
         self.soft_clipped_length
     }
 
@@ -320,5 +320,128 @@ impl FeatureSummary {
         if let Some(true) = near_end {
             self.n_near_ends += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stats_feature_position() {
+        let position = Position::try_from(42).unwrap();
+
+        let features = [
+            StatsFeature::Substitution { position, code: 1 },
+            StatsFeature::Insertion { position, len: 2 },
+            StatsFeature::Deletion { position, len: 3 },
+            StatsFeature::SoftClip { position, len: 4 },
+            StatsFeature::HardClip { position, len: 5 },
+            StatsFeature::ReferenceSkip { position, len: 6 },
+            StatsFeature::Padding { position, len: 7 },
+            StatsFeature::Ignore(position),
+        ];
+
+        for feature in features {
+            assert_eq!(feature.position(), position);
+        }
+    }
+
+    #[test]
+    fn test_stats_feature_near_ends() {
+        let read_length = 101;
+
+        let near_start = StatsFeature::Substitution {
+            position: Position::try_from(5).unwrap(),
+            code: 1,
+        };
+
+        let middle = StatsFeature::Insertion {
+            position: Position::try_from(50).unwrap(),
+            len: 2,
+        };
+
+        let near_end = StatsFeature::Deletion {
+            position: Position::try_from(95).unwrap(),
+            len: 3,
+        };
+
+        assert_eq!(near_start.near_ends(read_length), Some(true));
+        assert_eq!(middle.near_ends(read_length), Some(false));
+        assert_eq!(near_end.near_ends(read_length), Some(true));
+    }
+
+    #[test]
+    fn test_stats_feature_near_ends_for_short_read() {
+        let feature = StatsFeature::Substitution {
+            position: Position::try_from(5).unwrap(),
+            code: 1,
+        };
+
+        assert_eq!(feature.near_ends(2 * ENDS_OF_READ), None);
+        assert_eq!(feature.near_ends(ENDS_OF_READ), None);
+    }
+
+    #[test]
+    fn test_feature_summary() {
+        let record = StatsRecord {
+            read_length: 101,
+            features: vec![
+                StatsFeature::Substitution {
+                    position: Position::try_from(5).unwrap(),
+                    code: 1,
+                },
+                StatsFeature::Substitution {
+                    position: Position::try_from(50).unwrap(),
+                    code: 2,
+                },
+                StatsFeature::Insertion {
+                    position: Position::try_from(95).unwrap(),
+                    len: 3,
+                },
+                StatsFeature::Deletion {
+                    position: Position::try_from(40).unwrap(),
+                    len: 4,
+                },
+                StatsFeature::SoftClip {
+                    position: Position::try_from(1).unwrap(),
+                    len: 6,
+                },
+                StatsFeature::HardClip {
+                    position: Position::try_from(101).unwrap(),
+                    len: 7,
+                },
+                StatsFeature::ReferenceSkip {
+                    position: Position::try_from(60).unwrap(),
+                    len: 20,
+                },
+                StatsFeature::Padding {
+                    position: Position::try_from(70).unwrap(),
+                    len: 2,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let summary = record.feature_summary().unwrap();
+
+        assert_eq!(summary.event_count(), 4);
+        assert_eq!(summary.substitution_count(), 2);
+        assert_eq!(summary.insertion_count(), 1);
+        assert_eq!(summary.deletion_count(), 1);
+
+        assert_eq!(summary.near_end_count(), 2);
+
+        assert_eq!(summary.inserted_length(), 3);
+        assert_eq!(summary.deleted_length(), 4);
+        assert_eq!(summary.soft_clipped_length(), 6);
+        assert_eq!(summary.hard_clipped_length(), 7);
+    }
+
+    #[test]
+    fn test_feature_summary_is_none_without_features() {
+        let record = StatsRecord::default();
+
+        assert_eq!(record.feature_summary(), None);
     }
 }
