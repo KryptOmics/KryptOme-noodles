@@ -266,7 +266,7 @@ impl StatsFeature {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct FeatureSummary {
     ecnt: usize,
     n_substitutions: usize,

@@ -721,4 +721,79 @@ mod tests {
         let record = Record::default();
         assert_eq!(calculate_template_length(&record, &record), 0);
     }
+
+    #[test]
+    fn test_resolve_stats_mates() -> io::Result<()> {
+        // Keep this input equivalent to `test_resolve_mates` so the stats-specific
+        // resolver can be compared directly with the native CRAM resolver.
+        let mut records = vec![
+            StatsRecord {
+                bam_flags: sam::alignment::record::Flags::empty(),
+                reference_id: Some(2),
+                alignment_start: Position::new(5),
+                alignment_span: Some(4),
+                mate_distance: Some(0),
+                read_length: 4,
+                ..Default::default()
+            },
+            StatsRecord {
+                bam_flags: sam::alignment::record::Flags::empty(),
+                reference_id: Some(2),
+                alignment_start: Position::new(8),
+                alignment_span: Some(4),
+                mate_distance: Some(1),
+                read_length: 4,
+                ..Default::default()
+            },
+            StatsRecord::default(),
+            StatsRecord {
+                bam_flags: sam::alignment::record::Flags::empty(),
+                reference_id: Some(2),
+                alignment_start: Position::new(13),
+                alignment_span: Some(4),
+                read_length: 4,
+                ..Default::default()
+            },
+        ];
+
+        resolve_stats_mates(&mut records)?;
+
+        assert_eq!(records[0].mate_reference_id, records[1].reference_id);
+        assert_eq!(records[0].mate_alignment_start, records[1].alignment_start);
+        assert_eq!(records[0].template_length, 12);
+
+        assert_eq!(records[1].mate_reference_id, records[3].reference_id);
+        assert_eq!(records[1].mate_alignment_start, records[3].alignment_start);
+        assert_eq!(records[1].template_length, -12);
+
+        assert_eq!(records[3].mate_reference_id, records[0].reference_id);
+        assert_eq!(records[3].mate_alignment_start, records[0].alignment_start);
+        assert_eq!(records[3].template_length, -12);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_calculate_stats_template_length() {
+        let record = StatsRecord {
+            alignment_start: Position::new(100),
+            alignment_span: Some(50),
+            read_length: 50,
+            ..Default::default()
+        };
+
+        let mate = StatsRecord {
+            alignment_start: Position::new(200),
+            alignment_span: Some(50),
+            read_length: 50,
+            ..Default::default()
+        };
+
+        assert_eq!(calculate_stats_template_length(&record, &mate), 150);
+        assert_eq!(calculate_stats_template_length(&mate, &record), 150);
+
+        let record = StatsRecord::default();
+
+        assert_eq!(calculate_stats_template_length(&record, &record), 0);
+    }
 }
