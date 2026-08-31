@@ -9,13 +9,14 @@ use noodles_core::Position;
 use noodles_sam as sam;
 
 use crate::{
-    Record,
+    Record, StatsRecord,
     container::{
         CompressionHeader, ReferenceSequenceContext, block,
         compression_header::{data_series_encodings::DataSeries, preservation_map::tag_sets},
     },
     io::BitReader,
     record::{Feature, Flags, MateFlags, feature},
+    stats_record::StatsFeature,
 };
 
 #[allow(clippy::enum_variant_names)]
@@ -70,6 +71,29 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
         }
     }
 
+    // Consume the same CRAM data-series stream
+    // Populate only the fields StatsRecord needs
+    pub fn read_stats_record(&mut self, record: &mut StatsRecord) -> io::Result<()> {
+        record.bam_flags = self.read_bam_flags()?;
+        let cram_flags = self.read_cram_flags()?;
+
+        self.read_stats_positions(record)?;
+        self.skip_names()?;
+        self.read_stats_mate(record, cram_flags)?;
+        self.skip_data()?;
+
+        if record.bam_flags.is_unmapped() {
+            self.read_stats_unmapped_read(record, cram_flags)?;
+        } else {
+            self.read_stats_mapped_read(record, cram_flags)?;
+        }
+
+        self.id += 1;
+        self.prev_alignment_start = record.alignment_start;
+
+        Ok(())
+    }
+
     pub fn read_record(&mut self, record: &mut Record<'c>) -> io::Result<()> {
         record.id = self.id;
 
@@ -115,6 +139,23 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
                 u8::try_from(n).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             })
             .map(Flags::from)
+    }
+
+    fn read_stats_positions(&mut self, record: &mut StatsRecord) -> io::Result<()> {
+        record.reference_id = match self.reference_sequence_context {
+            ReferenceSequenceContext::Some(context) => Some(context.reference_sequence_id()),
+            ReferenceSequenceContext::None => None,
+            ReferenceSequenceContext::Many => self.read_reference_sequence_id()?,
+        };
+
+        record.read_length = self.read_read_length()?;
+        record.alignment_start = self.read_alignment_start()?;
+
+        // StatsRecord does not use read group, but this data series still
+        // belongs to the current CRAM stream and must be consumed
+        let _ = self.read_read_group_id()?;
+
+        Ok(())
     }
 
     fn read_positions(&mut self, record: &mut Record) -> io::Result<()> {
@@ -208,6 +249,18 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             })
     }
 
+    fn skip_names(&mut self) -> io::Result<()> {
+        if self
+            .compression_header
+            .preservation_map()
+            .records_have_names()
+        {
+            let _ = self.read_name()?;
+        }
+
+        Ok(())
+    }
+
     fn read_names(&mut self, record: &mut Record<'c>) -> io::Result<()> {
         let preservation_map = self.compression_header.preservation_map();
 
@@ -231,6 +284,35 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
                 MISSING => None,
                 _ => Some(buf),
             })
+    }
+
+    fn read_stats_mate(&mut self, record: &mut StatsRecord, cram_flags: Flags) -> io::Result<()> {
+        if cram_flags.is_detached() {
+            let mate_flags = self.read_mate_flags()?;
+
+            if mate_flags.is_on_negative_strand() {
+                record.bam_flags |= sam::alignment::record::Flags::MATE_REVERSE_COMPLEMENTED;
+            }
+
+            if mate_flags.is_unmapped() {
+                record.bam_flags |= sam::alignment::record::Flags::MATE_UNMAPPED;
+            }
+
+            if !self
+                .compression_header
+                .preservation_map()
+                .records_have_names()
+            {
+                let _ = self.read_name()?;
+            }
+
+            record.mate_reference_id = self.read_mate_reference_sequence_id()?;
+            record.mate_alignment_start = self.read_mate_alignment_start()?;
+            record.template_length = self.read_template_length()?;
+        } else if cram_flags.mate_is_downstream() {
+            record.mate_distance = self.read_mate_distance().map(Some)?;
+        }
+        Ok(())
     }
 
     fn read_mate(&mut self, record: &mut Record<'c>) -> io::Result<()> {
@@ -323,6 +405,41 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             })
     }
 
+    // Peer method to read_data. We do not operate on the returned data but
+    // only advance the data-series cursor
+    fn skip_data(&mut self) -> io::Result<()> {
+        let tag_set_id = self.read_tag_set_id()?;
+
+        let tag_set = self
+            .compression_header
+            .preservation_map()
+            .tag_sets()
+            .get(tag_set_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing tag set"))?;
+
+        for &key in tag_set {
+            let id = block::ContentId::from(key);
+
+            let _ = self
+                .compression_header
+                .tag_encodings()
+                .get(&id)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        ReadRecordError::MissingTagEncoding(key),
+                    )
+                })?
+                // decode() method advance the cursor
+                // Not calling self::data::read_value(...) is intentional
+                // Malformed tag payload value that would fail read_value will
+                // no longer be validated by our stats path here.
+                .decode(&mut self.core_data_reader, &mut self.external_data_readers)?;
+        }
+
+        Ok(())
+    }
+
     fn read_data(&mut self, record: &mut Record<'c>) -> io::Result<()> {
         let tag_set_id = self.read_tag_set_id()?;
 
@@ -368,6 +485,36 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             })
     }
 
+    fn read_stats_mapped_read(
+        &mut self,
+        record: &mut StatsRecord,
+        cram_flags: Flags,
+    ) -> io::Result<()> {
+        let feature_count = self.read_feature_count()?;
+
+        let mut alignment_span = record.read_length;
+        let mut prev_position = 0;
+
+        for _ in 0..feature_count {
+            let feature = self.read_stats_feature(prev_position, &mut alignment_span)?;
+
+            prev_position = usize::from(feature.position());
+
+            if !matches!(feature, StatsFeature::Ignore(_)) {
+                record.features.push(feature);
+            }
+        }
+
+        record.alignment_span = Some(alignment_span);
+        record.mapping_quality = self.read_mapping_quality()?;
+
+        if cram_flags.quality_scores_are_stored_as_array() {
+            let _ = self.read_quality_scores(record.read_length)?;
+        }
+
+        Ok(())
+    }
+
     fn read_mapped_read(&mut self, record: &mut Record<'c>) -> io::Result<()> {
         let feature_count = self.read_feature_count()?;
 
@@ -397,6 +544,88 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             .and_then(|n| {
                 usize::try_from(n).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             })
+    }
+
+    // Decodes one CRAM feature and updates the reference alignment span when the
+    // feature changes how many reference bases the read spans.
+    fn read_stats_feature(
+        &mut self,
+        prev_position: usize,
+        alignment_span: &mut usize,
+    ) -> io::Result<StatsFeature> {
+        use feature::Code;
+
+        let code = self.read_feature_code()?;
+
+        let delta = self.read_feature_position_delta()?;
+        let position = prev_position
+            .checked_add(delta)
+            .and_then(Position::new)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid feature position")
+            })?;
+
+        match code {
+            Code::Bases => {
+                let _ = self.read_stretches_of_bases()?;
+                Ok(StatsFeature::Ignore(position))
+            }
+            Code::Scores => {
+                let _ = self.read_stretches_of_quality_scores()?;
+                Ok(StatsFeature::Ignore(position))
+            }
+            Code::ReadBase => {
+                let _ = self.read_base()?;
+                let _ = self.read_quality_score()?;
+                Ok(StatsFeature::Ignore(position))
+            }
+            Code::Substitution => {
+                let code = self.read_base_substitution_code()?;
+                Ok(StatsFeature::Substitution { position, code })
+            }
+            Code::Insertion => {
+                let bases = self.read_insertion_bases()?;
+                let len = bases.len();
+                // Update alignment span
+                checked_sub_span(alignment_span, len)?;
+                Ok(StatsFeature::Insertion { position, len })
+            }
+            Code::Deletion => {
+                let len = self.read_deletion_length()?;
+                // Update alignment span
+                checked_add_span(alignment_span, len)?;
+                Ok(StatsFeature::Deletion { position, len })
+            }
+            Code::InsertBase => {
+                let _ = self.read_base()?;
+                // Update alignment span
+                checked_sub_span(alignment_span, 1)?;
+                Ok(StatsFeature::Ignore(position))
+            }
+            Code::QualityScore => {
+                let _ = self.read_quality_score()?;
+                Ok(StatsFeature::Ignore(position))
+            }
+            Code::ReferenceSkip => {
+                let len = self.read_reference_skip_length()?;
+                checked_add_span(alignment_span, len)?;
+                Ok(StatsFeature::ReferenceSkip { position, len })
+            }
+            Code::SoftClip => {
+                let bases = self.read_soft_clip_bases()?;
+                let len = bases.len();
+                checked_sub_span(alignment_span, len)?;
+                Ok(StatsFeature::SoftClip { position, len })
+            }
+            Code::Padding => {
+                let len = self.read_padding_length()?;
+                Ok(StatsFeature::Padding { position, len })
+            }
+            Code::HardClip => {
+                let len = self.read_hard_clip_length()?;
+                Ok(StatsFeature::HardClip { position, len })
+            }
+        }
     }
 
     fn read_feature(&mut self, prev_position: usize) -> io::Result<Feature<'c>> {
@@ -613,6 +842,21 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             .map(sam::alignment::record::MappingQuality::new)
     }
 
+    fn read_stats_unmapped_read(
+        &mut self,
+        record: &StatsRecord,
+        cram_flags: Flags,
+    ) -> io::Result<()> {
+        // Here, we still materialize the Cow<[u8]> using read_sequence
+        // and read_quality_scores. Later lets see if we can skip.
+        let _ = self.read_sequence(record.read_length)?;
+
+        if cram_flags.quality_scores_are_stored_as_array() {
+            let _ = self.read_quality_scores(record.read_length)?;
+        }
+        Ok(())
+    }
+
     fn read_unmapped_read(&mut self, record: &mut Record<'c>) -> io::Result<()> {
         record.sequence = self.read_sequence(record.read_length)?;
 
@@ -665,4 +909,22 @@ fn missing_data_series_encoding_error(data_series: DataSeries) -> io::Error {
         io::ErrorKind::InvalidData,
         ReadRecordError::MissingDataSeriesEncoding(data_series),
     )
+}
+
+// helper for adding to alignment span
+fn checked_add_span(span: &mut usize, n: usize) -> io::Result<()> {
+    *span = span
+        .checked_add(n)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "alignment span overflow"))?;
+
+    Ok(())
+}
+
+// helper for subtracting to alignment span
+fn checked_sub_span(span: &mut usize, n: usize) -> io::Result<()> {
+    *span = span
+        .checked_sub(n)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "alignment span underflow"))?;
+
+    Ok(())
 }

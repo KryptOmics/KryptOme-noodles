@@ -56,6 +56,33 @@ impl Container {
             }
         })
     }
+
+    // TODO: Revisit this helper when container/slice target planning is finalized.
+    pub fn read_slice_at_landmark(&self, landmark: u64) -> io::Result<Slice<'_>> {
+        let landmarks = &self.header.landmarks;
+
+        let Some(i) = landmarks.iter().position(|&pos| pos == landmark as usize) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("slice landmark not found in container: {landmark}"),
+            ));
+        };
+
+        let start = landmarks[i];
+
+        let end = landmarks.get(i + 1).copied().unwrap_or(self.src.len());
+
+        if start > end || end > self.src.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid slice landmark range",
+            ));
+        }
+
+        let mut src = &self.src[start..end];
+
+        read_slice(&mut src)
+    }
 }
 
 pub fn read_container<R>(reader: &mut R, container: &mut Container) -> io::Result<usize>

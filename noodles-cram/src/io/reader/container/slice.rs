@@ -13,7 +13,7 @@ use self::{
 };
 use super::read_block_as;
 use crate::{
-    Record, calculate_normalized_sequence_digest,
+    Record, StatsRecord, calculate_normalized_sequence_digest,
     container::{
         CompressionHeader, ReferenceSequenceContext,
         block::{self, ContentType},
@@ -55,6 +55,45 @@ impl<'c> Slice<'c> {
             .collect::<io::Result<_>>()?;
 
         Ok((core_data_src, external_data_srcs))
+    }
+
+    pub fn stats_records<'ch: 'c>(
+        &self,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+    ) -> io::Result<Vec<StatsRecord>> {
+        let core_data_reader = BitReader::new(core_data_src);
+
+        let mut external_data_readers = ExternalDataReaders::new();
+
+        for (block_content_id, src) in external_data_srcs {
+            external_data_readers.insert(*block_content_id, src);
+        }
+
+        // This is CRAM slice metadata, not nucleotide reference data.
+        // It is required to decode reference IDs and alignment-start deltas.
+        let reference_sequence_context = self.header.reference_sequence_context();
+        let initial_id = self.header.record_counter();
+
+        let mut reader = Records::new(
+            compression_header,
+            core_data_reader,
+            external_data_readers,
+            reference_sequence_context,
+            initial_id,
+        );
+
+        let mut records = Vec::with_capacity(self.header.record_count());
+        for _ in 0..self.header.record_count() {
+            let mut record = StatsRecord::default();
+            reader.read_stats_record(&mut record)?;
+            records.push(record);
+        }
+
+        resolve_stats_mates(&mut records)?;
+
+        Ok(records)
     }
 
     /// Reads and returns a list of raw records in this slice.
@@ -159,6 +198,88 @@ pub fn read_slice<'c>(src: &mut &'c [u8]) -> io::Result<Slice<'c>> {
     Ok(Slice { header, src })
 }
 
+fn resolve_stats_mates(records: &mut [StatsRecord]) -> io::Result<()> {
+    let mut mate_indices: Vec<_> = records
+        .iter()
+        .enumerate()
+        .map(|(i, record)| record.mate_distance.map(|len| i + len + 1))
+        .collect();
+
+    for i in 0..records.len() {
+        if mate_indices[i].is_none() {
+            continue;
+        }
+
+        let mut j = i;
+
+        // Walk the forward mate chain:
+        //
+        // A -> B -> C
+        //
+        // and populate each record's mate fields from the next record.
+        while let Some(mate_index) = mate_indices[j] {
+            let mid = j + 1;
+            let (left, right) = records.split_at_mut(mid);
+
+            let record = &mut left[j];
+            let mate = &mut right[mate_index - mid];
+
+            // We do not create an additional set_stats_mate wrapper
+            // This is what set_mate calls
+            set_mate_chunk(
+                &mut record.bam_flags,
+                &mut record.mate_reference_id,
+                &mut record.mate_alignment_start,
+                mate.bam_flags,
+                mate.reference_id,
+                mate.alignment_start,
+            );
+
+            j = mate_index;
+        }
+
+        // Close the chain by linking the final record back to the first:
+        //
+        // A -> B -> C
+        // ^         |
+        // |---------|
+        let (left, right) = records.split_at_mut(j);
+
+        let record = &mut right[0];
+        let mate = &mut left[i];
+
+        set_mate_chunk(
+            &mut record.bam_flags,
+            &mut record.mate_reference_id,
+            &mut record.mate_alignment_start,
+            mate.bam_flags,
+            mate.reference_id,
+            mate.alignment_start,
+        );
+
+        // This returns the absolute template span.
+        let template_length = calculate_stats_template_length(record, mate);
+
+        // Match native noodles semantics:
+        // first record in the chain gets positive TLEN.
+        records[i].template_length = template_length;
+
+        let mut j = i;
+
+        // Walk the chain again:
+        //   1. assign negative TLEN to downstream records;
+        //   2. clear resolved links so the outer loop does not process
+        //      the same template again.
+        while let Some(mate_index) = mate_indices[j] {
+            records[mate_index].template_length = -template_length;
+
+            mate_indices[j] = None;
+            j = mate_index;
+        }
+    }
+
+    Ok(())
+}
 fn resolve_mates(records: &mut [Record]) -> io::Result<()> {
     let mut mate_indices: Vec<_> = records
         .iter()
@@ -228,6 +349,36 @@ fn set_mate(record: &mut Record, mate: &mut Record) {
         mate.reference_sequence_id,
         mate.alignment_start,
     );
+}
+
+fn calculate_stats_template_length(record: &StatsRecord, mate: &StatsRecord) -> i32 {
+    let Some(start) = record
+        .alignment_start
+        .min(mate.alignment_start)
+        .map(usize::from)
+    else {
+        return 0;
+    };
+
+    let record_alignment_end = record.raw_alignment_end();
+    let mate_alignment_end = mate.raw_alignment_end();
+
+    let Some(end) = record_alignment_end
+        .max(mate_alignment_end)
+        .map(usize::from)
+    else {
+        return 0;
+    };
+
+    // This is where we are different from calculate_template_length(...)
+    // `start` is the minimum alignment start and `end` is the maximum
+    // alignment end, so a valid pair necessarily satisfies start <= end.
+    let Some(len) = end.checked_sub(start).and_then(|n| n.checked_add(1)) else {
+        return 0;
+    };
+
+    // Should come back to this to probably have a 0 fallback as above.
+    i32::try_from(len).expect("invalid template length")
 }
 
 fn calculate_template_length(record: &Record, mate: &Record) -> i32 {
