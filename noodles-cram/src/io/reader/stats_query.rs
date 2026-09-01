@@ -116,7 +116,7 @@ where
     }
 }
 
-fn intersects(record: &StatsRecord, region_interval: Interval) -> bool {
+pub(crate) fn intersects(record: &StatsRecord, region_interval: Interval) -> bool {
     let (Some(start), Some(span)) = (record.alignment_start, record.alignment_span) else {
         return false;
     };
@@ -132,12 +132,12 @@ fn intersects(record: &StatsRecord, region_interval: Interval) -> bool {
 }
 
 #[derive(Eq, PartialEq)]
-struct TargetCandidate {
-    container_offset: u64,
-    landmarks: Vec<u64>,
+pub(crate) struct TargetCandidate {
+    pub(crate) container_offset: u64,
+    pub(crate) landmarks: Vec<u64>,
 }
 
-fn get_target_candidates(
+pub(crate) fn get_target_candidates(
     index: &crai::Index,
     reference_seq_id: usize,
     interval: Interval,

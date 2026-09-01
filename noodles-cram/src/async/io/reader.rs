@@ -7,6 +7,7 @@ pub mod header;
 mod num;
 mod query;
 mod records;
+mod stats_query;
 
 use futures::{Stream, TryStreamExt};
 use noodles_core::Region;
@@ -16,7 +17,7 @@ use tokio::io::{self, AsyncRead, AsyncSeek, AsyncSeekExt, SeekFrom};
 
 pub use self::builder::Builder;
 use self::{container::read_container, crc_reader::CrcReader, header::read_header};
-use crate::{FileDefinition, crai, io::reader::Container};
+use crate::{FileDefinition, StatsRecord, crai, io::reader::Container};
 
 /// An async CRAM reader.
 pub struct Reader<R> {
@@ -344,6 +345,35 @@ where
         Ok(query(
             self,
             header,
+            index,
+            reference_sequence_id,
+            region.interval(),
+        ))
+    }
+
+    pub fn query_stats<'r, 'i: 'r>(
+        &'r mut self,
+        header: &sam::Header,
+        index: &'i crai::Index,
+        region: &Region,
+    ) -> io::Result<impl Stream<Item = io::Result<StatsRecord>> + use<'r, 'i, R>>
+    where
+        R: AsyncRead + AsyncSeek + Unpin,
+    {
+        use self::stats_query::query_stats;
+
+        let reference_sequence_id = header
+            .reference_sequences()
+            .get_index_of(region.name())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid reference sequence name",
+                )
+            })?;
+
+        Ok(query_stats(
+            self,
             index,
             reference_sequence_id,
             region.interval(),

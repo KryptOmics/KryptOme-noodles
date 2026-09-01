@@ -7,7 +7,7 @@ pub mod header;
 pub(crate) mod num;
 mod query;
 mod records;
-mod stats_query;
+pub(crate) mod stats_query;
 
 use std::io::{self, Read, Seek, SeekFrom};
 

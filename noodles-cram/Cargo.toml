@@ -39,6 +39,8 @@ libdeflater = { workspace = true, optional = true }
 [dev-dependencies]
 noodles-sam = { path = "../noodles-sam", version = "0.85.0", features = ["async"] }
 tokio = { workspace = true, features = ["io-std", "macros", "rt-multi-thread"] }
+object_store = { version = "0.14", features = ["aws"] }
+url = "2.5"
 
 [lints]
 workspace = true
@@ -52,6 +54,10 @@ required-features = ["async"]
 
 [[example]]
 name = "cram_query_async"
+required-features = ["async"]
+
+[[example]]
+name = "cram_query_stats_async"
 required-features = ["async"]
 
 [[example]]
