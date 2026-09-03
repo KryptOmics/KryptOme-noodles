@@ -57,7 +57,11 @@ impl Container {
         })
     }
 
-    // TODO: Revisit this helper when container/slice target planning is finalized.
+    // Reads a slice from an already-loaded container using its landmark offset.
+    //
+    // This supports the current minimal stats query path. A higher-level execution
+    // layer may eventually select and read slice byte ranges directly rather than
+    // loading the full container first.
     pub fn read_slice_at_landmark(&self, landmark: u64) -> io::Result<Slice<'_>> {
         let landmarks = &self.header.landmarks;
 

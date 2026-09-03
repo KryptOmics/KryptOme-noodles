@@ -1,3 +1,7 @@
+//! This example decodes records of a remote CRAM in a given region without a
+//! reference using the refactored stats-query and stats-records paths.
+//!
+
 use std::{
     env,
     error::Error,
@@ -265,6 +269,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         reader.read_index()?
     };
 
+    // Main entry point
     let query = reader.query_stats(&header, &index, &region)?;
 
     let output = File::create(output_path).await?;

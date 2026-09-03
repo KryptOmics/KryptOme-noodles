@@ -92,6 +92,12 @@ where
     }
 }
 
+// Drives the current stats query by loading candidate containers on demand and
+// filtering decoded records against the requested interval.
+//
+// This iterator is intentionally coupled to the minimal target-selection path
+// above and is expected to simplify once container and slice planning moves to
+// a higher-level layer.
 impl<R> Iterator for StatsQuery<'_, R>
 where
     R: Read + Seek,
@@ -116,6 +122,11 @@ where
     }
 }
 
+// Applies the final record-level interval filter for the current stats query.
+//
+// This complements the coarse CRAI-based candidate selection above. The
+// filtering responsibility may move once target planning is centralized at a
+// higher level.
 pub(crate) fn intersects(record: &StatsRecord, region_interval: Interval) -> bool {
     let (Some(start), Some(span)) = (record.alignment_start, record.alignment_span) else {
         return false;
@@ -131,12 +142,21 @@ pub(crate) fn intersects(record: &StatsRecord, region_interval: Interval) -> boo
     region_interval.intersects(alignment_interval)
 }
 
+// A minimal container/slice selection result used by the current stats query
+// path. Target planning is expected to move to a higher-level layer once the
+// direct stats decoding path is fully integrated.
 #[derive(Eq, PartialEq)]
 pub(crate) struct TargetCandidate {
     pub(crate) container_offset: u64,
     pub(crate) landmarks: Vec<u64>,
 }
 
+// Selects the CRAI-backed container offsets and slice landmarks needed by the
+// current regional stats query.
+//
+// This intentionally keeps planning local and simple. More general target
+// planning, including coalescing and remote-aware execution, is expected to be
+// handled by a higher-level layer.
 pub(crate) fn get_target_candidates(
     index: &crai::Index,
     reference_seq_id: usize,
@@ -168,6 +188,8 @@ pub(crate) fn get_target_candidates(
         .collect()
 }
 
+// Similarly, this will be refactored into a more generic function
+// in a higher level layer.
 fn crai_record_intersects(record: &crai::Record, interval: Interval) -> bool {
     let Some(start) = record.alignment_start() else {
         return false;

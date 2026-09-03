@@ -1,5 +1,7 @@
-//! Queries a CRAM file for a given region without reference.
+//! This example decodes records of a local CRAM in a given region without a
+//! reference using the refactored stats-query and stats-records paths.
 //!
+
 use std::{
     env,
     error::Error,
@@ -63,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let index = crai::fs::read(crai_path)?;
 
+    // Main entry point
     let query = reader.query_stats(&header, &index, &region)?;
 
     let output = File::create(output_path)?;
