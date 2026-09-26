@@ -351,6 +351,7 @@ where
         ))
     }
 
+    /// Mirror query(...) but return a stream of StatsRecord for a given region.
     pub fn query_stats<'r, 'i: 'r>(
         &'r mut self,
         header: &sam::Header,

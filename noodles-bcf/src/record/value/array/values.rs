@@ -61,9 +61,12 @@ impl<'a> vcf::variant::record::samples::series::value::array::Values<'a, i32> fo
 
 impl Values<'_, i16> {
     pub(crate) fn iter(&self) -> impl Iterator<Item = Int16> + '_ {
-        self.src.chunks_exact(mem::size_of::<i16>()).map(|chunk| {
-            // SAFETY: `chunk` is 2 bytes.
-            let n = i16::from_le_bytes(chunk.try_into().unwrap());
+        let (chunks, []) = self.src.as_chunks() else {
+            panic!();
+        };
+
+        chunks.iter().map(|chunk| {
+            let n = i16::from_le_bytes(*chunk);
             Int16::from(n)
         })
     }
@@ -100,9 +103,12 @@ impl<'a> vcf::variant::record::samples::series::value::array::Values<'a, i32> fo
 
 impl Values<'_, i32> {
     pub(crate) fn iter(&self) -> impl Iterator<Item = Int32> + '_ {
-        self.src.chunks_exact(mem::size_of::<i32>()).map(|chunk| {
-            // SAFETY: `chunk` is 4 bytes.
-            let n = i32::from_le_bytes(chunk.try_into().unwrap());
+        let (chunks, []) = self.src.as_chunks() else {
+            panic!();
+        };
+
+        chunks.iter().map(|chunk| {
+            let n = i32::from_le_bytes(*chunk);
             Int32::from(n)
         })
     }
@@ -139,9 +145,12 @@ impl<'a> vcf::variant::record::samples::series::value::array::Values<'a, i32> fo
 
 impl Values<'_, f32> {
     pub(crate) fn iter(&self) -> impl Iterator<Item = Float> + '_ {
-        self.src.chunks_exact(mem::size_of::<f32>()).map(|chunk| {
-            // SAFETY: `chunk` is 4 bytes.
-            let n = f32::from_le_bytes(chunk.try_into().unwrap());
+        let (chunks, []) = self.src.as_chunks() else {
+            panic!();
+        };
+
+        chunks.iter().map(|chunk| {
+            let n = f32::from_le_bytes(*chunk);
             Float::from(n)
         })
     }

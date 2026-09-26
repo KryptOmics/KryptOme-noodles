@@ -73,15 +73,6 @@ impl ObjectStoreReader {
             pending_seek: None,
         }
     }
-
-    fn clear_buffer(&mut self) {
-        self.buffer.clear();
-        self.buffer_start = 0;
-
-        // Dropping an in-flight future effectively cancels the pending range
-        // read when a seek moves us elsewhere.
-        self.state = ReadState::Idle;
-    }
 }
 
 impl AsyncRead for ObjectStoreReader {
@@ -154,10 +145,7 @@ impl AsyncRead for ObjectStoreReader {
 impl AsyncSeek for ObjectStoreReader {
     fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
         if self.pending_seek.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "seek already in progress",
-            ));
+            return Err(std::io::Error::other("seek already in progress"));
         }
 
         let pos = match position {

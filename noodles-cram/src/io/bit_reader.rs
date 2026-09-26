@@ -24,7 +24,7 @@ impl<'c> BitReader<'c> {
 
     fn read_u32(&mut self, len: u32) -> io::Result<u32> {
         if len > MAX_READ_LENGTH {
-            return Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid read length",
             ))?;

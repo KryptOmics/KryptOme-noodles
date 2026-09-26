@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io, marker::PhantomData, mem};
+use std::{borrow::Cow, io, marker::PhantomData};
 
 use noodles_sam as sam;
 
@@ -49,10 +49,14 @@ impl<'c> sam::alignment::record::data::field::value::array::Values<'c, i16>
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = io::Result<i16>> + '_> {
+        let (chunks, []) = self.src[OFFSET..].as_chunks() else {
+            panic!();
+        };
+
         Box::new(
-            self.src[OFFSET..]
-                .chunks_exact(mem::size_of::<i16>())
-                .map(|buf| i16::from_le_bytes(buf.try_into().unwrap()))
+            chunks
+                .iter()
+                .map(|chunk| i16::from_le_bytes(*chunk))
                 .map(Ok),
         )
     }
@@ -66,10 +70,14 @@ impl<'c> sam::alignment::record::data::field::value::array::Values<'c, u16>
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = io::Result<u16>> + '_> {
+        let (chunks, []) = self.src[OFFSET..].as_chunks() else {
+            panic!();
+        };
+
         Box::new(
-            self.src[OFFSET..]
-                .chunks_exact(mem::size_of::<u16>())
-                .map(|buf| u16::from_le_bytes(buf.try_into().unwrap()))
+            chunks
+                .iter()
+                .map(|chunk| u16::from_le_bytes(*chunk))
                 .map(Ok),
         )
     }
@@ -83,10 +91,14 @@ impl<'c> sam::alignment::record::data::field::value::array::Values<'c, i32>
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = io::Result<i32>> + '_> {
+        let (chunks, []) = self.src[OFFSET..].as_chunks() else {
+            panic!();
+        };
+
         Box::new(
-            self.src[OFFSET..]
-                .chunks_exact(mem::size_of::<i32>())
-                .map(|buf| i32::from_le_bytes(buf.try_into().unwrap()))
+            chunks
+                .iter()
+                .map(|chunk| i32::from_le_bytes(*chunk))
                 .map(Ok),
         )
     }
@@ -100,10 +112,14 @@ impl<'c> sam::alignment::record::data::field::value::array::Values<'c, u32>
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = io::Result<u32>> + '_> {
+        let (chunks, []) = self.src[OFFSET..].as_chunks() else {
+            panic!();
+        };
+
         Box::new(
-            self.src[OFFSET..]
-                .chunks_exact(mem::size_of::<u32>())
-                .map(|buf| u32::from_le_bytes(buf.try_into().unwrap()))
+            chunks
+                .iter()
+                .map(|chunk| u32::from_le_bytes(*chunk))
                 .map(Ok),
         )
     }
@@ -117,10 +133,14 @@ impl<'c> sam::alignment::record::data::field::value::array::Values<'c, f32>
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = io::Result<f32>> + '_> {
+        let (chunks, []) = self.src[OFFSET..].as_chunks() else {
+            panic!();
+        };
+
         Box::new(
-            self.src[OFFSET..]
-                .chunks_exact(mem::size_of::<f32>())
-                .map(|buf| f32::from_le_bytes(buf.try_into().unwrap()))
+            chunks
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk))
                 .map(Ok),
         )
     }
