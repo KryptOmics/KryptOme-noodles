@@ -7,6 +7,7 @@ pub mod header;
 pub(crate) mod num;
 mod query;
 mod records;
+pub(crate) mod stats_query;
 
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -14,6 +15,7 @@ use noodles_core::Region;
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 
+pub use self::stats_query::StatsQuery;
 pub use self::{builder::Builder, container::Container, query::Query, records::Records};
 use self::{container::read_container, header::read_header};
 use crate::{FileDefinition, crai};
@@ -333,6 +335,31 @@ where
         Ok(Query::new(
             self,
             header,
+            index,
+            reference_sequence_id,
+            region.interval(),
+        ))
+    }
+
+    /// query records for stats purpose
+    pub fn query_stats<'r, 'h: 'r>(
+        &'r mut self,
+        header: &'h sam::Header,
+        index: &crai::Index,
+        region: &Region,
+    ) -> io::Result<StatsQuery<'r, R>> {
+        let reference_sequence_id = header
+            .reference_sequences()
+            .get_index_of(region.name())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid reference sequence name",
+                )
+            })?;
+
+        Ok(StatsQuery::new(
+            self,
             index,
             reference_sequence_id,
             region.interval(),

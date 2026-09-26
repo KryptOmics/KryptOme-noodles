@@ -11,10 +11,11 @@ pub mod fs;
 mod huffman;
 pub mod io;
 pub mod record;
+pub mod stats_record;
 
 use md5::{Digest, Md5};
 
-pub use self::{file_definition::FileDefinition, record::Record};
+pub use self::{file_definition::FileDefinition, record::Record, stats_record::StatsRecord};
 
 const MAGIC_NUMBER: [u8; 4] = *b"CRAM";
 const MD5_OUTPUT_SIZE: usize = 16;
