@@ -96,6 +96,126 @@ impl<'c> Slice<'c> {
         Ok(records)
     }
 
+    /// Fork-extension: Decodes a mate-complete prefix of records until
+    /// the caller's genomic boundary has been passed.
+    ///
+    /// `is_past_boundary` is called for decoded records until it first returns
+    /// `true`. The predicate must be monotonic with respect to CRAM record order:
+    /// once a record is past the boundary, all subsequent records must also be
+    /// past that boundary.
+    ///
+    /// After the predicate first returns `true`, decoding can continue as needed
+    /// to resolve downstream mate relationships for records already retained in
+    /// the prefix.
+    pub fn stats_records_until_boundary<'ch: 'c, F>(
+        &self,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+        mut is_past_boundary: F,
+    ) -> io::Result<Vec<StatsRecord>>
+    where
+        F: FnMut(&StatsRecord) -> bool,
+    {
+        let core_data_reader = BitReader::new(core_data_src);
+
+        let mut external_data_readers = ExternalDataReaders::new();
+
+        for (block_content_id, src) in external_data_srcs {
+            external_data_readers.insert(*block_content_id, src);
+        }
+
+        // This is CRAM slice metadata, not nucleotide reference data.
+        // It is required to decode reference IDs and alignment-start deltas.
+        let reference_sequence_context = self.header.reference_sequence_context();
+        let initial_id = self.header.record_counter();
+
+        let mut reader = Records::new(
+            compression_header,
+            core_data_reader,
+            external_data_readers,
+            reference_sequence_context,
+            initial_id,
+        );
+
+        let record_count = self.header.record_count();
+        let mut records = Vec::with_capacity(record_count);
+
+        // The greatest record index that must still be decoded in order to
+        // complete a forward mate chain started by an already-decoded record.
+        //
+        // `None` means no decoded record currently depends on a later record.
+        let mut required_decode_through: Option<usize> = None;
+
+        // Once the query boundary has been passed, decoding continues only while
+        // an earlier record still requires a later mate record.
+        let mut past_boundary = false;
+
+        for record_index in 0..record_count {
+            let mut record = StatsRecord::default();
+            reader.read_stats_record(&mut record)?;
+
+            let record_is_past_boundary = past_boundary || is_past_boundary(&record);
+
+            // If this is the first record beyond the query boundary and no
+            // previously decoded mate chain reaches this record, it is not needed
+            // at all. Do not add it to the prefix.
+            let is_required_by_previous_mate = required_decode_through
+                .is_some_and(|required_mate_index| record_index <= required_mate_index);
+
+            if record_is_past_boundary && !is_required_by_previous_mate {
+                break;
+            }
+
+            // This record belongs to the decoded prefix. If it points to a later
+            // mate, extend the prefix far enough to include that record.
+            if let Some(mate_distance) = record.mate_distance {
+                let mate_index = record_index
+                    .checked_add(mate_distance)
+                    .and_then(|i| i.checked_add(1))
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "stats mate record index overflow",
+                        )
+                    })?;
+
+                if mate_index >= record_count {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "stats mate record index is out of bounds",
+                    ));
+                }
+
+                required_decode_through = Some(
+                    required_decode_through.map_or(mate_index, |current| current.max(mate_index)),
+                );
+            }
+
+            records.push(record);
+
+            if record_is_past_boundary {
+                past_boundary = true;
+            }
+
+            // We have crossed the query boundary and have now decoded every
+            // record required by forward mate chains from the retained prefix.
+            //
+            // A required record can itself extend `required_decode_through`, so
+            // this check must happen after processing its mate distance.
+            if past_boundary
+                && required_decode_through
+                    .is_none_or(|required_index| record_index >= required_index)
+            {
+                break;
+            }
+        }
+
+        resolve_stats_mates(&mut records)?;
+
+        Ok(records)
+    }
+
     /// Reads and returns a list of raw records in this slice.
     ///
     /// # Examples
@@ -280,6 +400,7 @@ fn resolve_stats_mates(records: &mut [StatsRecord]) -> io::Result<()> {
 
     Ok(())
 }
+
 fn resolve_mates(records: &mut [Record]) -> io::Result<()> {
     let mut mate_indices: Vec<_> = records
         .iter()
