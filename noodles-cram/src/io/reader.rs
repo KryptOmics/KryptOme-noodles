@@ -7,6 +7,7 @@ pub mod header;
 pub(crate) mod num;
 mod query;
 mod records;
+mod selective;
 pub(crate) mod stats_query;
 
 use std::io::{self, Read, Seek, SeekFrom};
@@ -18,6 +19,7 @@ use noodles_sam as sam;
 pub use self::stats_query::StatsQuery;
 pub use self::{builder::Builder, container::Container, query::Query, records::Records};
 use self::{container::read_container, header::read_header};
+pub use crate::container::Header;
 use crate::{FileDefinition, crai};
 
 /// A CRAM reader.

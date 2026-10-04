@@ -1,8 +1,12 @@
 #![allow(missing_docs)]
-use std::{fs::File, io, path::PathBuf};
+use std::{
+    fs::File,
+    io::{self, SeekFrom},
+    path::PathBuf,
+};
 
 use noodles_core::Position;
-use noodles_cram::{self as cram, StatsRecord, io::reader::Container};
+use noodles_cram::{self as cram, StatsRecord, container::Header, io::reader::Container};
 use noodles_fasta::{self as fasta, repository::adapters::IndexedReader};
 
 #[test]
@@ -634,6 +638,161 @@ fn stats_records_until_stops_at_boundary_for_detached_mates() -> io::Result<()> 
         tested_detached_boundary,
         "fixture contains no usable detached-mate coordinate boundary"
     );
+
+    Ok(())
+}
+
+#[test]
+/// Tests that selective slice reading produces the same stats records as
+/// the existing full-container path.
+///
+/// Each slice is read once from a fully materialized container and once by
+/// seeking directly to its landmark and reading only that slice's byte range.
+fn selective_stats_records_match_full_container_path() -> io::Result<()> {
+    let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let cram_path = data_dir.join("NA12878.chr22.cram");
+
+    // Existing full-container path.
+    let mut full_reader = File::open(&cram_path).map(cram::io::Reader::new)?;
+
+    // New selective path.
+    let mut selective_reader = File::open(cram_path).map(cram::io::Reader::new)?;
+
+    let _ = full_reader.read_header()?;
+    let _ = selective_reader.read_header()?;
+
+    let mut container = Container::default();
+    let mut container_header = Header::default();
+
+    let mut container_index = 0;
+
+    loop {
+        //
+        // Existing path:
+        //
+        // read_container()
+        //     -> parses header
+        //     -> materializes the entire container payload
+        //
+        let full_data_len = full_reader.read_container(&mut container)?;
+
+        //
+        // Selective path:
+        //
+        // read_container_header()
+        //     -> parses only the container header
+        //     -> leaves the payload unread
+        //
+        let selective_data_len = selective_reader.read_container_header(&mut container_header)?;
+
+        assert_eq!(
+            selective_data_len, full_data_len,
+            "container payload length mismatch at container {container_index}",
+        );
+
+        if full_data_len == 0 {
+            break;
+        }
+
+        // read_container_header leaves the selective reader exactly at the
+        // start of the container content: compression_header.
+        let payload_start = selective_reader.seek(SeekFrom::Current(0))?;
+
+        let expected_compression_header = container.compression_header()?;
+
+        let actual_compression_header =
+            selective_reader.read_compression_header(&container_header, selective_data_len)?;
+
+        // The compression header occupies payload bytes [0, first_landmark).
+        // After reading it, the selective reader must therefore be positioned
+        // at the first slice, or at the end of the payload when no slices exist.
+        let expected_position = payload_start
+            + u64::try_from(
+                container_header
+                    .landmarks
+                    .first()
+                    .copied()
+                    .unwrap_or(selective_data_len),
+            )
+            .expect("container payload offset must fit in u64");
+
+        // This test `selective::read_compression_header` moves the reader
+        // to the expected position.
+        assert_eq!(
+            selective_reader.seek(SeekFrom::Current(0))?,
+            expected_position,
+            "unexpected reader position after compression header \
+             at container {container_index}",
+        );
+
+        for (slice_index, &landmark) in container_header.landmarks.iter().enumerate() {
+            let slice_end = container_header
+                .landmarks
+                .get(slice_index + 1)
+                .copied()
+                .unwrap_or(selective_data_len);
+
+            let slice_len = slice_end
+                .checked_sub(landmark)
+                .expect("slice landmark range must be valid");
+
+            //
+            // Existing stats path:
+            //
+            // The entire container is already in memory, so retrieve the
+            // slice from Container::src using its landmark.
+            //
+            let expected_slice = container.read_slice_at_landmark(
+                u64::try_from(landmark).expect("slice landmark must fit in u64"),
+            )?;
+
+            let (core_data_src, external_data_srcs) = expected_slice.decode_blocks()?;
+
+            let expected = expected_slice.stats_records(
+                &expected_compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?;
+
+            //
+            // Selective path:
+            //
+            // Seek directly from the payload start to this slice and read
+            // only its physical byte range.
+            //
+            let slice_offset = payload_start
+                .checked_add(u64::try_from(landmark).expect("slice landmark must fit in u64"))
+                .expect("slice offset must not overflow");
+
+            selective_reader.seek(SeekFrom::Start(slice_offset))?;
+
+            let actual = selective_reader.read_selective_slice_until(
+                slice_len,
+                &actual_compression_header,
+                |_| false,
+            )?;
+
+            assert_eq!(
+                actual, expected,
+                "selective slice decoding mismatch at container \
+                 {container_index}, slice {slice_index}",
+            );
+        }
+
+        // Unlike read_container(), the selective reader is controlled by
+        // explicit seeks. Put it at the next container header before the
+        // next iteration.
+        let next_container_offset = payload_start
+            .checked_add(
+                u64::try_from(selective_data_len)
+                    .expect("container payload length must fit in u64"),
+            )
+            .expect("next container offset must not overflow");
+
+        selective_reader.seek(SeekFrom::Start(next_container_offset))?;
+
+        container_index += 1;
+    }
 
     Ok(())
 }
