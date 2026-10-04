@@ -416,12 +416,12 @@ fn find_cut_with_forward_mate_dependency(records: &[StatsRecord]) -> Option<(usi
 }
 
 #[test]
-/// Tests that selective stats decoding continues beyond the genomic
-/// boundary when a retained record depends on a downstream mate.
+/// Tests that bounded stats decoding can resolve downstream mates beyond
+/// the genomic boundary without returning those downstream records.
 ///
-/// The extended prefix must remain identical to the corresponding prefix from
-/// full-slice decoding, including resolved mate fields and template lengths.
-fn stats_records_until_extends_prefix_for_mates() -> io::Result<()> {
+/// The returned prefix must match full-slice decoding through the boundary,
+/// including mate fields and template lengths resolved using later records.
+fn stats_records_until_boundary_resolves_mates_beyond_boundary() -> io::Result<()> {
     let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
     let cram_path = data_dir.join("NA12878.chr22.cram");
 
@@ -480,11 +480,13 @@ fn stats_records_until_extends_prefix_for_mates() -> io::Result<()> {
 
             // The nominal genomic boundary is `cut`, but mate resolution
             // requires the decoder to continue through `closure_end`.
-            assert_eq!(selected_records.len(), closure_end + 1);
+            // assert_eq!(selected_records.len(), closure_end + 1);
+            assert_eq!(selected_records.len(), cut + 1);
 
             // Every returned record, including mate/TLEN fields populated by
             // resolve_stats_mates, must match ordinary full-slice decoding.
-            assert_eq!(selected_records, full_records[..=closure_end],);
+            // assert_eq!(selected_records, full_records[..=closure_end],);
+            assert_eq!(selected_records, full_records[..=cut],);
 
             tested_mate_extension = true;
             break 'containers;

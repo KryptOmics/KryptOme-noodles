@@ -141,6 +141,12 @@ impl<'c> Slice<'c> {
         let record_count = self.header.record_count();
         let mut records = Vec::with_capacity(record_count);
 
+        // The first index past the caller-defined genomic boundary.
+        //
+        // Records after this point can still be decoded temporarily to complete
+        // downstream mate chains, but they are not part of the returned prefix.
+        let mut boundary_len = None;
+
         // The greatest record index that must still be decoded in order to
         // complete a forward mate chain started by an already-decoded record.
         //
@@ -156,6 +162,10 @@ impl<'c> Slice<'c> {
             reader.read_stats_record(&mut record)?;
 
             let record_is_past_boundary = past_boundary || is_past_boundary(&record);
+
+            if record_is_past_boundary && boundary_len.is_none() {
+                boundary_len = Some(records.len());
+            }
 
             // If this is the first record beyond the query boundary and no
             // previously decoded mate chain reaches this record, it is not needed
@@ -174,21 +184,20 @@ impl<'c> Slice<'c> {
                     .checked_add(mate_distance)
                     .and_then(|i| i.checked_add(1))
                     .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "stats mate record index overflow",
-                        )
+                        io::Error::new(io::ErrorKind::InvalidData, "mate record index overflow")
                     })?;
 
                 if mate_index >= record_count {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "stats mate record index is out of bounds",
+                        "mate record index exceeds slice record count",
                     ));
                 }
 
                 required_decode_through = Some(
-                    required_decode_through.map_or(mate_index, |current| current.max(mate_index)),
+                    required_decode_through.map_or(mate_index, |required_mate_index| {
+                        required_mate_index.max(mate_index)
+                    }),
                 );
             }
 
@@ -213,6 +222,11 @@ impl<'c> Slice<'c> {
 
         resolve_stats_mates(&mut records)?;
 
+        // Downstream records decoded solely for mate resolution are an internal
+        // implementation detail and are not part of the returned query prefix.
+        if let Some(len) = boundary_len {
+            records.truncate(len);
+        }
         Ok(records)
     }
 
