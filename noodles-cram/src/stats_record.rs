@@ -112,31 +112,22 @@ impl StatsRecord {
         self.alignment_span
     }
 
-    pub(crate) fn raw_alignment_end(&self) -> Option<Position> {
-        let start = self.alignment_start?;
-        let span = self.alignment_span?;
+    pub fn alignment_end(&self) -> io::Result<Option<Position>> {
+        let Some(start) = self.alignment_start else {
+            return Ok(None);
+        };
 
-        let end = span
-            .checked_sub(1)
-            .and_then(|n| start.get().checked_add(n))?;
-        Position::new(end)
-    }
+        let Some(span) = self.alignment_span else {
+            return Ok(Some(start));
+        };
 
-    pub fn alignment_end(&self, reference_length: usize) -> Option<Position> {
-        let start = self.alignment_start()?.get();
-        let span = self.alignment_span()?;
-
-        // A reference length of 0 cannot produce a valid 1-based Position.
-        // Position is NonZero.
-        Position::new(reference_length)?;
-
-        if start > reference_length {
-            return None;
+        if span == 0 {
+            return Ok(Some(start));
         }
 
-        let end = self.raw_alignment_end()?;
-
-        Position::new(end.get().min(reference_length))
+        start.checked_add(span - 1).map(Some).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "record alignment end overflow")
+        })
     }
 
     pub fn mapping_quality(&self) -> Option<sam::alignment::record::MappingQuality> {

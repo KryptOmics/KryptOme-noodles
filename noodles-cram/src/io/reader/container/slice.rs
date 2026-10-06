@@ -392,7 +392,7 @@ fn resolve_stats_mates(records: &mut [StatsRecord]) -> io::Result<()> {
         );
 
         // This returns the absolute template span.
-        let template_length = calculate_stats_template_length(record, mate);
+        let template_length = calculate_stats_template_length(record, mate)?;
 
         // Match native noodles semantics:
         // first record in the chain gets positive TLEN.
@@ -486,34 +486,39 @@ fn set_mate(record: &mut Record, mate: &mut Record) {
     );
 }
 
-fn calculate_stats_template_length(record: &StatsRecord, mate: &StatsRecord) -> i32 {
+fn calculate_stats_template_length(record: &StatsRecord, mate: &StatsRecord) -> io::Result<i32> {
     let Some(start) = record
         .alignment_start
         .min(mate.alignment_start)
         .map(usize::from)
     else {
-        return 0;
+        return Ok(0);
     };
 
-    let record_alignment_end = record.raw_alignment_end();
-    let mate_alignment_end = mate.raw_alignment_end();
+    // A StatsRecord only has an alignment span for a mapped read.
+    // Preserve the previous TLEN behavior for records without one.
+    if record.alignment_span.is_none() || mate.alignment_span.is_none() {
+        return Ok(0);
+    }
 
-    let Some(end) = record_alignment_end
-        .max(mate_alignment_end)
-        .map(usize::from)
-    else {
-        return 0;
+    let Some(record_alignment_end) = record.alignment_end()? else {
+        return Ok(0);
     };
+    let Some(mate_alignment_end) = mate.alignment_end()? else {
+        return Ok(0);
+    };
+
+    let end = usize::from(record_alignment_end.max(mate_alignment_end));
 
     // This is where we are different from calculate_template_length(...)
     // `start` is the minimum alignment start and `end` is the maximum
     // alignment end, so a valid pair necessarily satisfies start <= end.
     let Some(len) = end.checked_sub(start).and_then(|n| n.checked_add(1)) else {
-        return 0;
+        return Ok(0);
     };
 
     // Should come back to this to probably have a 0 fallback as above.
-    i32::try_from(len).expect("invalid template length")
+    i32::try_from(len).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn calculate_template_length(record: &Record, mate: &Record) -> i32 {
@@ -909,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_stats_template_length() {
+    fn test_calculate_stats_template_length() -> io::Result<()> {
         let record = StatsRecord {
             alignment_start: Position::new(100),
             alignment_span: Some(50),
@@ -924,11 +929,12 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(calculate_stats_template_length(&record, &mate), 150);
-        assert_eq!(calculate_stats_template_length(&mate, &record), 150);
+        assert_eq!(calculate_stats_template_length(&record, &mate)?, 150);
+        assert_eq!(calculate_stats_template_length(&mate, &record)?, 150);
 
         let record = StatsRecord::default();
 
-        assert_eq!(calculate_stats_template_length(&record, &record), 0);
+        assert_eq!(calculate_stats_template_length(&record, &record)?, 0);
+        Ok(())
     }
 }

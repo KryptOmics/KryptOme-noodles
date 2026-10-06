@@ -286,7 +286,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .unwrap_or_else(|| ".".into());
 
         let alignment_end = record
-            .alignment_end(reference_length.get())
+            .alignment_end()?
             .map(|position| position.get().to_string())
             .unwrap_or_else(|| ".".into());
 
