@@ -57,12 +57,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut reader = File::open(&cram_path).map(cram::io::Reader::new)?;
     let header = reader.read_header()?;
 
-    let reference_lengths = header
-        .reference_sequences()
-        .iter()
-        .map(|(_, reference_sequence)| reference_sequence.length())
-        .collect::<Vec<_>>();
-
     let index = crai::fs::read(crai_path)?;
 
     // Main entry point
@@ -80,10 +74,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let record = result?;
 
         let Some(reference_id) = record.reference_id() else {
-            continue;
-        };
-
-        let Some(reference_length) = reference_lengths.get(reference_id) else {
             continue;
         };
 

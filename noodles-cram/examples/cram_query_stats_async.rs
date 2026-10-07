@@ -229,12 +229,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Header decoding is sequential and does not require the reference.
     let header = reader.read_header().await?;
 
-    let reference_lengths = header
-        .reference_sequences()
-        .iter()
-        .map(|(_, reference_sequence)| reference_sequence.length())
-        .collect::<Vec<_>>();
-
     // Infer the index URL in the same way as the local example:
     //
     //     sample.cram
@@ -273,10 +267,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     while let Some(record) = query.try_next().await? {
         let Some(reference_id) = record.reference_id() else {
-            continue;
-        };
-
-        let Some(reference_length) = reference_lengths.get(reference_id) else {
             continue;
         };
 

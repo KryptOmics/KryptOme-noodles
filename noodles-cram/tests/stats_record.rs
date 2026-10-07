@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use noodles_core::Position;
+use noodles_core::{Position, Region};
 use noodles_cram::{self as cram, StatsRecord, container::Header, io::reader::Container};
 use noodles_fasta::{self as fasta, repository::adapters::IndexedReader};
 
@@ -654,72 +654,59 @@ fn selective_stats_records_match_full_container_path() -> io::Result<()> {
     let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
     let cram_path = data_dir.join("NA12878.chr22.cram");
 
-    // Existing full-container path.
+    //
+    // Existing full-container stats path.
+    //
     let mut full_reader = File::open(&cram_path).map(cram::io::Reader::new)?;
-
-    // New selective path.
-    let mut selective_reader = File::open(cram_path).map(cram::io::Reader::new)?;
-
     let _ = full_reader.read_header()?;
+
+    let expected = full_reader
+        .stats_records()
+        .collect::<io::Result<Vec<_>>>()?;
+
+    //
+    // Selective path.
+    //
+    let mut selective_reader = File::open(cram_path).map(cram::io::Reader::new)?;
     let _ = selective_reader.read_header()?;
 
-    let mut container = Container::default();
     let mut container_header = Header::default();
+    let mut actual = Vec::new();
 
     let mut container_index = 0;
 
     loop {
         //
-        // Existing path:
+        // Read only the container header. This leaves the reader at the start
+        // of the container payload.
         //
-        // read_container()
-        //     -> parses header
-        //     -> materializes the entire container payload
-        //
-        let full_data_len = full_reader.read_container(&mut container)?;
+        let data_len = selective_reader.read_container_header(&mut container_header)?;
 
-        //
-        // Selective path:
-        //
-        // read_container_header()
-        //     -> parses only the container header
-        //     -> leaves the payload unread
-        //
-        let selective_data_len = selective_reader.read_container_header(&mut container_header)?;
-
-        assert_eq!(
-            selective_data_len, full_data_len,
-            "container payload length mismatch at container {container_index}",
-        );
-
-        if full_data_len == 0 {
+        if data_len == 0 {
             break;
         }
 
-        // read_container_header leaves the selective reader exactly at the
-        // start of the container content: compression_header.
         let payload_start = selective_reader.seek(SeekFrom::Current(0))?;
 
-        let expected_compression_header = container.compression_header()?;
-
-        let actual_compression_header =
-            selective_reader.read_compression_header(&container_header, selective_data_len)?;
+        let compression_header =
+            selective_reader.read_compression_header(&container_header, data_len)?;
 
         // The compression header occupies payload bytes [0, first_landmark).
-        // After reading it, the selective reader must therefore be positioned
-        // at the first slice, or at the end of the payload when no slices exist.
+        // After reading it, the reader must therefore be positioned at the
+        // first slice, or at the end of the payload when no slices exist.
         let expected_position = payload_start
-            + u64::try_from(
-                container_header
-                    .landmarks
-                    .first()
-                    .copied()
-                    .unwrap_or(selective_data_len),
+            .checked_add(
+                u64::try_from(
+                    container_header
+                        .landmarks()
+                        .first()
+                        .copied()
+                        .unwrap_or(data_len),
+                )
+                .expect("container payload offset must fit in u64"),
             )
-            .expect("container payload offset must fit in u64");
+            .expect("reader position must not overflow");
 
-        // This test `selective::read_compression_header` moves the reader
-        // to the expected position.
         assert_eq!(
             selective_reader.seek(SeekFrom::Current(0))?,
             expected_position,
@@ -727,74 +714,181 @@ fn selective_stats_records_match_full_container_path() -> io::Result<()> {
              at container {container_index}",
         );
 
-        for (slice_index, &landmark) in container_header.landmarks.iter().enumerate() {
+        for (slice_index, &landmark) in container_header.landmarks().iter().enumerate() {
             let slice_end = container_header
-                .landmarks
+                .landmarks()
                 .get(slice_index + 1)
                 .copied()
-                .unwrap_or(selective_data_len);
+                .unwrap_or(data_len);
 
             let slice_len = slice_end
                 .checked_sub(landmark)
                 .expect("slice landmark range must be valid");
 
-            //
-            // Existing stats path:
-            //
-            // The entire container is already in memory, so retrieve the
-            // slice from Container::src using its landmark.
-            //
-            let expected_slice = container.read_slice_at_landmark(
-                u64::try_from(landmark).expect("slice landmark must fit in u64"),
-            )?;
-
-            let (core_data_src, external_data_srcs) = expected_slice.decode_blocks()?;
-
-            let expected = expected_slice.stats_records(
-                &expected_compression_header,
-                &core_data_src,
-                &external_data_srcs,
-            )?;
-
-            //
-            // Selective path:
-            //
-            // Seek directly from the payload start to this slice and read
-            // only its physical byte range.
-            //
             let slice_offset = payload_start
                 .checked_add(u64::try_from(landmark).expect("slice landmark must fit in u64"))
                 .expect("slice offset must not overflow");
 
             selective_reader.seek(SeekFrom::Start(slice_offset))?;
 
-            let actual = selective_reader.read_selective_slice_until(
+            let records = selective_reader.read_selective_slice_until(
                 slice_len,
-                &actual_compression_header,
+                &compression_header,
                 |_| false,
             )?;
 
-            assert_eq!(
-                actual, expected,
-                "selective slice decoding mismatch at container \
-                 {container_index}, slice {slice_index}",
-            );
+            actual.extend(records);
         }
 
-        // Unlike read_container(), the selective reader is controlled by
-        // explicit seeks. Put it at the next container header before the
-        // next iteration.
+        // Selective slice reads use explicit seeks, so restore the reader to
+        // the start of the next container before continuing.
         let next_container_offset = payload_start
-            .checked_add(
-                u64::try_from(selective_data_len)
-                    .expect("container payload length must fit in u64"),
-            )
+            .checked_add(u64::try_from(data_len).expect("container payload length must fit in u64"))
             .expect("next container offset must not overflow");
 
         selective_reader.seek(SeekFrom::Start(next_container_offset))?;
 
         container_index += 1;
     }
+
+    assert_eq!(actual, expected);
+
+    Ok(())
+}
+
+#[test]
+fn stats_records_iterator_matches_direct_stats_records() -> io::Result<()> {
+    let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let cram_path = data_dir.join("NA12878.chr22.cram");
+
+    //
+    // Expected: existing low-level full-container stats path.
+    //
+    let mut expected_reader = File::open(&cram_path).map(cram::io::Reader::new)?;
+    let _ = expected_reader.read_header()?;
+
+    let mut container = Container::default();
+    let mut expected = Vec::new();
+
+    while expected_reader.read_container(&mut container)? != 0 {
+        let compression_header = container.compression_header()?;
+
+        for result in container.slices() {
+            let slice = result?;
+
+            let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
+
+            expected.extend(slice.stats_records(
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?);
+        }
+    }
+
+    //
+    // Actual: new high-level sequential StatsRecords path.
+    //
+    let mut actual_reader = File::open(cram_path).map(cram::io::Reader::new)?;
+    let _ = actual_reader.read_header()?;
+
+    let actual = actual_reader
+        .stats_records()
+        .collect::<io::Result<Vec<_>>>()?;
+
+    assert_eq!(actual, expected);
+
+    Ok(())
+}
+
+#[test]
+fn query_stats_matches_stats_records_for_region() -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+
+    let cram_path = data_dir.join("NA12878.chr22.cram");
+    let crai_path = data_dir.join("NA12878.chr22.cram.crai");
+
+    let index = cram::crai::fs::read(crai_path)?;
+
+    // Derive a real query interval from the fixture CRAI rather than
+    // hard-coding coordinates.
+    let index_record = index
+        .iter()
+        .find(|record| {
+            record.reference_sequence_id().is_some() && record.alignment_start().is_some()
+        })
+        .expect("test CRAI must contain a mapped slice");
+
+    let reference_sequence_id = index_record
+        .reference_sequence_id()
+        .expect("mapped CRAI record must have a reference sequence ID");
+
+    let start = index_record
+        .alignment_start()
+        .expect("mapped CRAI record must have an alignment start");
+
+    let end = usize::from(start)
+        .checked_add(index_record.alignment_span())
+        .and_then(|n| n.checked_sub(1))
+        .and_then(Position::new)
+        .expect("test CRAI record must have a valid alignment interval");
+
+    //
+    // Expected: sequential StatsRecords path + exact interval filtering.
+    //
+    let mut full_reader = File::open(&cram_path).map(cram::io::Reader::new)?;
+    let header = full_reader.read_header()?;
+
+    let (reference_name, _) = header
+        .reference_sequences()
+        .get_index(reference_sequence_id)
+        .expect("CRAI reference ID must exist in the CRAM header");
+
+    let region: Region = format!(
+        "{}:{}-{}",
+        reference_name,
+        usize::from(start),
+        usize::from(end)
+    )
+    .parse()?;
+
+    let interval = region.interval();
+
+    let mut expected = Vec::new();
+
+    for result in full_reader.stats_records() {
+        let record = result?;
+
+        if record.reference_id() != Some(reference_sequence_id) {
+            continue;
+        }
+
+        let Some(alignment_start) = record.alignment_start() else {
+            continue;
+        };
+
+        let Some(alignment_end) = record.alignment_end()? else {
+            continue;
+        };
+
+        let alignment_interval = (alignment_start..=alignment_end).into();
+
+        if interval.intersects(alignment_interval) {
+            expected.push(record);
+        }
+    }
+
+    //
+    // Actual: indexed, container-pruned StatsQuery path.
+    //
+    let mut query_reader = File::open(cram_path).map(cram::io::Reader::new)?;
+    let query_header = query_reader.read_header()?;
+
+    let actual = query_reader
+        .query_stats(&query_header, &index, &region)?
+        .collect::<io::Result<Vec<_>>>()?;
+
+    assert_eq!(actual, expected);
 
     Ok(())
 }

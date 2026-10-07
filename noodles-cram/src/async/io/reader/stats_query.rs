@@ -7,11 +7,11 @@ use tokio::io::{self, AsyncRead, AsyncSeek};
 use super::Reader;
 use crate::{StatsRecord, crai, io::reader::Container};
 
-use crate::io::reader::stats_query::{TargetCandidate, get_target_candidates, intersects};
+use crate::io::reader::stats_query::{intersects, prune_duplicate_container_targets};
 
 struct Context<'r, R> {
     reader: &'r mut Reader<R>,
-    target_candidates: vec::IntoIter<TargetCandidate>,
+    container_targets: vec::IntoIter<u64>,
     interval: Interval,
     records: vec::IntoIter<StatsRecord>,
 }
@@ -25,11 +25,12 @@ pub(super) fn query_stats<'r, R>(
 where
     R: AsyncRead + AsyncSeek + Unpin,
 {
-    let target_candidates = get_target_candidates(index, reference_sequence_id, interval);
+    let container_targets =
+        prune_duplicate_container_targets(index, reference_sequence_id, interval);
 
     let ctx = Context {
         reader,
-        target_candidates: target_candidates.into_iter(),
+        container_targets: container_targets.into_iter(),
         interval,
         records: Vec::new().into_iter(),
     };
@@ -38,7 +39,7 @@ where
         loop {
             match ctx.records.next() {
                 Some(record) => {
-                    if intersects(&record, ctx.interval) {
+                    if intersects(&record, ctx.interval)? {
                         return Ok(Some((record, ctx)));
                     }
                 }
@@ -56,13 +57,9 @@ async fn read_next_container<R>(ctx: &mut Context<'_, R>) -> Option<io::Result<(
 where
     R: AsyncRead + AsyncSeek + Unpin,
 {
-    let target = ctx.target_candidates.next()?;
+    let container_target = ctx.container_targets.next()?;
 
-    if let Err(e) = ctx
-        .reader
-        .seek(SeekFrom::Start(target.container_offset))
-        .await
-    {
+    if let Err(e) = ctx.reader.seek(SeekFrom::Start(container_target)).await {
         return Some(Err(e));
     }
 
@@ -79,15 +76,13 @@ where
         Err(e) => return Some(Err(e)),
     };
 
-    let records = target
-        .landmarks
-        .iter()
-        .map(|landmark| {
-            let slice = container.read_slice_at_landmark(*landmark)?;
+    let records = container
+        .slices()
+        .map(|result| {
+            let slice = result?;
 
             let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
 
-            // Shared sync/async decoding path.
             slice.stats_records(&compression_header, &core_data_src, &external_data_srcs)
         })
         .collect::<io::Result<Vec<_>>>();
