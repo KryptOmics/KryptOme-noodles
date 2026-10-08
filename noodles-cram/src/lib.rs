@@ -11,6 +11,7 @@ pub mod fs;
 mod huffman;
 pub mod io;
 pub mod record;
+/// CRAM record without reference
 pub mod stats_record;
 
 use md5::{Digest, Md5};

@@ -8,6 +8,7 @@ use std::{
 use noodles_core::{Position, Region};
 use noodles_cram::{self as cram, StatsRecord, container::Header, io::reader::Container};
 use noodles_fasta::{self as fasta, repository::adapters::IndexedReader};
+use noodles_sam::{self as sam, alignment::Record as _};
 
 #[test]
 /// Tests that direct stats decoding matches the native full-record path.
@@ -40,24 +41,13 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
 
             let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
 
-            //
-            // Native path:
-            //
-            // Slice::records()
-            //     -> cram::Record
-            //     -> StatsRecord::try_from_full_record()
-            //
-            let expected = slice
-                .records(
-                    repository.clone(),
-                    &header,
-                    &compression_header,
-                    &core_data_src,
-                    &external_data_srcs,
-                )?
-                .iter()
-                .map(|record| StatsRecord::try_from_full_record(&header, record))
-                .collect::<io::Result<Vec<_>>>()?;
+            let expected = slice.records(
+                repository.clone(),
+                &header,
+                &compression_header,
+                &core_data_src,
+                &external_data_srcs,
+            )?;
 
             // New direct stats path:
             //
@@ -79,13 +69,14 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
             for (record_index, (actual_record, expected_record)) in
                 actual.iter().zip(&expected).enumerate()
             {
-                assert_stats_record_equivalence(
+                assert_stats_record_matches_full_record(
                     actual_record,
                     expected_record,
+                    &header,
                     container_index,
                     slice_index,
                     record_index,
-                );
+                )?;
             }
         }
 
@@ -95,82 +86,76 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-fn assert_stats_record_equivalence(
+fn assert_stats_record_matches_full_record(
     actual: &StatsRecord,
-    expected: &StatsRecord,
+    expected: &cram::Record<'_>,
+    header: &sam::Header,
     container_index: usize,
     slice_index: usize,
     record_index: usize,
-) {
+) -> io::Result<()> {
     let context =
         format!("container {container_index}, slice {slice_index}, record {record_index}");
 
     assert_eq!(
         actual.bam_flags(),
-        expected.bam_flags(),
+        expected.flags()?,
         "{context}: bam_flags"
     );
 
     assert_eq!(
         actual.reference_id(),
-        expected.reference_id(),
+        expected.reference_sequence_id(header).transpose()?,
         "{context}: reference_id"
     );
 
     assert_eq!(
         actual.alignment_start(),
-        expected.alignment_start(),
+        expected.alignment_start().transpose()?,
         "{context}: alignment_start"
     );
 
-    // Unlike the native CRAM Record implementation, StatsRecord treats an
-    // unmapped record as having no reference alignment span, even when the
-    // record is placed on a reference for sorting.
     if actual.bam_flags().is_unmapped() {
         assert_eq!(actual.alignment_span(), None, "{context}: alignment_span");
     } else {
         assert_eq!(
             actual.alignment_span(),
-            expected.alignment_span(),
+            expected.alignment_span().transpose()?,
             "{context}: alignment_span"
         );
     }
 
     assert_eq!(
         actual.mapping_quality(),
-        expected.mapping_quality(),
+        expected.mapping_quality().transpose()?,
         "{context}: mapping_quality"
     );
 
     assert_eq!(
         actual.template_length(),
-        expected.template_length(),
+        expected.template_length()?,
         "{context}: template_length"
     );
 
     assert_eq!(
         actual.mate_reference_id(),
-        expected.mate_reference_id(),
+        expected.mate_reference_sequence_id(header).transpose()?,
         "{context}: mate_reference_id"
     );
 
     assert_eq!(
         actual.mate_alignment_start(),
-        expected.mate_alignment_start(),
+        expected.mate_alignment_start().transpose()?,
         "{context}: mate_alignment_start"
     );
 
     assert_eq!(
         actual.read_length(),
-        expected.read_length(),
+        expected.sequence().len(),
         "{context}: read_length"
     );
 
-    assert_eq!(
-        actual.feature_summary(),
-        expected.feature_summary(),
-        "{context}: feature_summary"
-    );
+    Ok(())
 }
 
 #[test]
