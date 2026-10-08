@@ -1,6 +1,3 @@
-// FIXME: fix all of these when mature enough
-#![allow(dead_code, unused, missing_docs)]
-
 use std::io;
 
 use crate::Record;
@@ -8,6 +5,7 @@ use crate::record::Feature;
 use noodles_core::Position;
 use noodles_sam::{self as sam, alignment::Record as _};
 
+/// A CRAM record without reference.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StatsRecord {
     pub(crate) bam_flags: sam::alignment::record::Flags,
@@ -42,8 +40,9 @@ impl Default for StatsRecord {
 }
 
 impl StatsRecord {
-    // Still reconstruct from the navtive cram::Record<'_>. No need once
-    // we have read_stats_record() in which we build StatsRecord directly.
+    // Used by the integration tests to compare reference-backed CRAM decoding
+    // against the direct stats-record decoding path.
+    #[doc(hidden)]
     pub fn try_from_full_record(header: &sam::Header, record: &Record<'_>) -> io::Result<Self> {
         let stats_features = record
             .features
@@ -96,73 +95,76 @@ impl StatsRecord {
         })
     }
 
+    /// Returns the BAM flags.
     pub fn bam_flags(&self) -> sam::alignment::record::Flags {
         self.bam_flags
     }
 
+    /// Returns the reference sequence ID.
     pub fn reference_id(&self) -> Option<usize> {
         self.reference_id
     }
 
+    /// Returns the alignment start.
     pub fn alignment_start(&self) -> Option<Position> {
         self.alignment_start
     }
 
+    /// Return the alignment span.
     pub fn alignment_span(&self) -> Option<usize> {
         self.alignment_span
     }
 
-    pub(crate) fn raw_alignment_end(&self) -> Option<Position> {
-        let start = self.alignment_start?;
-        let span = self.alignment_span?;
+    /// Return the alignment end.
+    pub fn alignment_end(&self) -> io::Result<Option<Position>> {
+        let Some(start) = self.alignment_start else {
+            return Ok(None);
+        };
 
-        let end = span
-            .checked_sub(1)
-            .and_then(|n| start.get().checked_add(n))?;
-        Position::new(end)
-    }
+        let Some(span) = self.alignment_span else {
+            return Ok(Some(start));
+        };
 
-    pub fn alignment_end(&self, reference_length: usize) -> Option<Position> {
-        let start = self.alignment_start()?.get();
-        let span = self.alignment_span()?;
-
-        // A reference length of 0 cannot produce a valid 1-based Position.
-        // Position is NonZero.
-        Position::new(reference_length)?;
-
-        if start > reference_length {
-            return None;
+        if span == 0 {
+            return Ok(Some(start));
         }
 
-        let end = self.raw_alignment_end()?;
-
-        Position::new(end.get().min(reference_length))
+        start.checked_add(span - 1).map(Some).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "record alignment end overflow")
+        })
     }
 
+    /// Returns mapping quality.
     pub fn mapping_quality(&self) -> Option<sam::alignment::record::MappingQuality> {
         self.mapping_quality
     }
 
+    /// Returns the template length.
     pub fn template_length(&self) -> i32 {
         self.template_length
     }
 
+    /// Returns the mate distance.
     pub fn mate_distance(&self) -> Option<usize> {
         self.mate_distance
     }
 
+    /// Returns the reference ID the mate mapped to.
     pub fn mate_reference_id(&self) -> Option<usize> {
         self.mate_reference_id
     }
 
+    /// Returns the mate's alignment start.
     pub fn mate_alignment_start(&self) -> Option<Position> {
         self.mate_alignment_start
     }
 
+    /// Returns the read length.
     pub fn read_length(&self) -> usize {
         self.read_length
     }
 
+    /// Return the feature summary.
     pub fn feature_summary(&self) -> Option<FeatureSummary> {
         if self.features.is_empty() {
             return None;
@@ -171,18 +173,18 @@ impl StatsRecord {
         let read_length = self.read_length();
         for feature in &self.features {
             match feature {
-                StatsFeature::Substitution { position, .. } => {
+                StatsFeature::Substitution { .. } => {
                     feature_summary.n_substitutions += 1;
                     feature_summary.ecnt += 1;
                     feature_summary.count_near_end_event(feature.near_ends(read_length));
                 }
-                StatsFeature::Insertion { position, len } => {
+                StatsFeature::Insertion { len, .. } => {
                     feature_summary.n_insertions += 1;
                     feature_summary.ecnt += 1;
                     feature_summary.inserted_length += len;
                     feature_summary.count_near_end_event(feature.near_ends(read_length));
                 }
-                StatsFeature::Deletion { position, len } => {
+                StatsFeature::Deletion { len, .. } => {
                     feature_summary.n_deletions += 1;
                     feature_summary.ecnt += 1;
                     feature_summary.deleted_length += len;
@@ -266,6 +268,7 @@ impl StatsFeature {
     }
 }
 
+/// Feature summary for a CRAM record.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FeatureSummary {
     ecnt: usize,
@@ -280,38 +283,47 @@ pub struct FeatureSummary {
 }
 
 impl FeatureSummary {
+    /// Returns the number of feature events.
     pub fn event_count(&self) -> usize {
         self.ecnt
     }
 
+    /// Returns the number of substitution events.
     pub fn substitution_count(&self) -> usize {
         self.n_substitutions
     }
 
+    /// Returns the number of insertion events.
     pub fn insertion_count(&self) -> usize {
         self.n_insertions
     }
 
+    /// Returns the number of deletion events.
     pub fn deletion_count(&self) -> usize {
         self.n_deletions
     }
 
+    /// Returns the number of feature event near the end of read.
     pub fn near_end_count(&self) -> usize {
         self.n_near_ends
     }
 
+    /// Returns the total inserted length.
     pub fn inserted_length(&self) -> usize {
         self.inserted_length
     }
 
+    /// Returns the total deleted length.
     pub fn deleted_length(&self) -> usize {
         self.deleted_length
     }
 
+    /// Returns the total soft-clipped length.
     pub fn soft_clipped_length(&self) -> usize {
         self.soft_clipped_length
     }
 
+    /// Returns the total hard-clipped length.
     pub fn hard_clipped_length(&self) -> usize {
         self.hard_clipped_length
     }
@@ -419,6 +431,7 @@ mod tests {
                     position: Position::try_from(70).unwrap(),
                     len: 2,
                 },
+                StatsFeature::Ignore(Position::try_from(5).unwrap()),
             ],
             ..Default::default()
         };

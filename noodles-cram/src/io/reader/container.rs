@@ -102,3 +102,15 @@ where
         }
     }
 }
+
+/// Fork-extension: Reads only a CRAM container header.
+///
+/// On success, the reader is positioned at the start of the container
+/// payload. The returned value is the payload length. A value of `0`
+/// denotes the CRAM EOF container.
+pub(crate) fn read_container_header<R>(reader: &mut R, header: &mut Header) -> io::Result<usize>
+where
+    R: Read,
+{
+    read_header(reader, header)
+}

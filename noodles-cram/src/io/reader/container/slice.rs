@@ -96,6 +96,140 @@ impl<'c> Slice<'c> {
         Ok(records)
     }
 
+    /// Fork-extension: Decodes a mate-complete prefix of records until
+    /// the caller's genomic boundary has been passed.
+    ///
+    /// `is_past_boundary` is called for decoded records until it first returns
+    /// `true`. The predicate must be monotonic with respect to CRAM record order:
+    /// once a record is past the boundary, all subsequent records must also be
+    /// past that boundary.
+    ///
+    /// After the predicate first returns `true`, decoding can continue as needed
+    /// to resolve downstream mate relationships for records already retained in
+    /// the prefix.
+    pub fn stats_records_until_boundary<'ch: 'c, F>(
+        &self,
+        compression_header: &'ch CompressionHeader,
+        core_data_src: &'c [u8],
+        external_data_srcs: &'c [(block::ContentId, Cow<'c, [u8]>)],
+        mut is_past_boundary: F,
+    ) -> io::Result<Vec<StatsRecord>>
+    where
+        F: FnMut(&StatsRecord) -> bool,
+    {
+        let core_data_reader = BitReader::new(core_data_src);
+
+        let mut external_data_readers = ExternalDataReaders::new();
+
+        for (block_content_id, src) in external_data_srcs {
+            external_data_readers.insert(*block_content_id, src);
+        }
+
+        // This is CRAM slice metadata, not nucleotide reference data.
+        // It is required to decode reference IDs and alignment-start deltas.
+        let reference_sequence_context = self.header.reference_sequence_context();
+        let initial_id = self.header.record_counter();
+
+        let mut reader = Records::new(
+            compression_header,
+            core_data_reader,
+            external_data_readers,
+            reference_sequence_context,
+            initial_id,
+        );
+
+        let record_count = self.header.record_count();
+        let mut records = Vec::with_capacity(record_count);
+
+        // The first index past the caller-defined genomic boundary.
+        //
+        // Records after this point can still be decoded temporarily to complete
+        // downstream mate chains, but they are not part of the returned prefix.
+        let mut boundary_len = None;
+
+        // The greatest record index that must still be decoded in order to
+        // complete a forward mate chain started by an already-decoded record.
+        //
+        // `None` means no decoded record currently depends on a later record.
+        let mut required_decode_through: Option<usize> = None;
+
+        // Once the query boundary has been passed, decoding continues only while
+        // an earlier record still requires a later mate record.
+        let mut past_boundary = false;
+
+        for record_index in 0..record_count {
+            let mut record = StatsRecord::default();
+            reader.read_stats_record(&mut record)?;
+
+            let record_is_past_boundary = past_boundary || is_past_boundary(&record);
+
+            if record_is_past_boundary && boundary_len.is_none() {
+                boundary_len = Some(records.len());
+            }
+
+            // If this is the first record beyond the query boundary and no
+            // previously decoded mate chain reaches this record, it is not needed
+            // at all. Do not add it to the prefix.
+            let is_required_by_previous_mate = required_decode_through
+                .is_some_and(|required_mate_index| record_index <= required_mate_index);
+
+            if record_is_past_boundary && !is_required_by_previous_mate {
+                break;
+            }
+
+            // This record belongs to the decoded prefix. If it points to a later
+            // mate, extend the prefix far enough to include that record.
+            if let Some(mate_distance) = record.mate_distance {
+                let mate_index = record_index
+                    .checked_add(mate_distance)
+                    .and_then(|i| i.checked_add(1))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "mate record index overflow")
+                    })?;
+
+                if mate_index >= record_count {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "mate record index exceeds slice record count",
+                    ));
+                }
+
+                required_decode_through = Some(
+                    required_decode_through.map_or(mate_index, |required_mate_index| {
+                        required_mate_index.max(mate_index)
+                    }),
+                );
+            }
+
+            records.push(record);
+
+            if record_is_past_boundary {
+                past_boundary = true;
+            }
+
+            // We have crossed the query boundary and have now decoded every
+            // record required by forward mate chains from the retained prefix.
+            //
+            // A required record can itself extend `required_decode_through`, so
+            // this check must happen after processing its mate distance.
+            if past_boundary
+                && required_decode_through
+                    .is_none_or(|required_index| record_index >= required_index)
+            {
+                break;
+            }
+        }
+
+        resolve_stats_mates(&mut records)?;
+
+        // Downstream records decoded solely for mate resolution are an internal
+        // implementation detail and are not part of the returned query prefix.
+        if let Some(len) = boundary_len {
+            records.truncate(len);
+        }
+        Ok(records)
+    }
+
     /// Reads and returns a list of raw records in this slice.
     ///
     /// # Examples
@@ -258,7 +392,7 @@ fn resolve_stats_mates(records: &mut [StatsRecord]) -> io::Result<()> {
         );
 
         // This returns the absolute template span.
-        let template_length = calculate_stats_template_length(record, mate);
+        let template_length = calculate_stats_template_length(record, mate)?;
 
         // Match native noodles semantics:
         // first record in the chain gets positive TLEN.
@@ -280,6 +414,7 @@ fn resolve_stats_mates(records: &mut [StatsRecord]) -> io::Result<()> {
 
     Ok(())
 }
+
 fn resolve_mates(records: &mut [Record]) -> io::Result<()> {
     let mut mate_indices: Vec<_> = records
         .iter()
@@ -351,34 +486,39 @@ fn set_mate(record: &mut Record, mate: &mut Record) {
     );
 }
 
-fn calculate_stats_template_length(record: &StatsRecord, mate: &StatsRecord) -> i32 {
+fn calculate_stats_template_length(record: &StatsRecord, mate: &StatsRecord) -> io::Result<i32> {
     let Some(start) = record
         .alignment_start
         .min(mate.alignment_start)
         .map(usize::from)
     else {
-        return 0;
+        return Ok(0);
     };
 
-    let record_alignment_end = record.raw_alignment_end();
-    let mate_alignment_end = mate.raw_alignment_end();
+    // A StatsRecord only has an alignment span for a mapped read.
+    // Preserve the previous TLEN behavior for records without one.
+    if record.alignment_span.is_none() || mate.alignment_span.is_none() {
+        return Ok(0);
+    }
 
-    let Some(end) = record_alignment_end
-        .max(mate_alignment_end)
-        .map(usize::from)
-    else {
-        return 0;
+    let Some(record_alignment_end) = record.alignment_end()? else {
+        return Ok(0);
     };
+    let Some(mate_alignment_end) = mate.alignment_end()? else {
+        return Ok(0);
+    };
+
+    let end = usize::from(record_alignment_end.max(mate_alignment_end));
 
     // This is where we are different from calculate_template_length(...)
     // `start` is the minimum alignment start and `end` is the maximum
     // alignment end, so a valid pair necessarily satisfies start <= end.
     let Some(len) = end.checked_sub(start).and_then(|n| n.checked_add(1)) else {
-        return 0;
+        return Ok(0);
     };
 
     // Should come back to this to probably have a 0 fallback as above.
-    i32::try_from(len).expect("invalid template length")
+    i32::try_from(len).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn calculate_template_length(record: &Record, mate: &Record) -> i32 {
@@ -774,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_stats_template_length() {
+    fn test_calculate_stats_template_length() -> io::Result<()> {
         let record = StatsRecord {
             alignment_start: Position::new(100),
             alignment_span: Some(50),
@@ -789,11 +929,12 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(calculate_stats_template_length(&record, &mate), 150);
-        assert_eq!(calculate_stats_template_length(&mate, &record), 150);
+        assert_eq!(calculate_stats_template_length(&record, &mate)?, 150);
+        assert_eq!(calculate_stats_template_length(&mate, &record)?, 150);
 
         let record = StatsRecord::default();
 
-        assert_eq!(calculate_stats_template_length(&record, &record), 0);
+        assert_eq!(calculate_stats_template_length(&record, &record)?, 0);
+        Ok(())
     }
 }

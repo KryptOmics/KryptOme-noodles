@@ -1,8 +1,9 @@
-// TODO: Move target selection and slice planning out of the CRAM reader once
-// the direct stats decoding path is validated.
+// Stats queries use the CRAI to prune candidate containers. Each selected
+// container is read in full, and records are filtered against the requested
+// interval after decoding.
 
 use std::{
-    collections::BTreeMap,
+    collections::BTreeSet,
     io::{self, Read, Seek, SeekFrom},
     vec,
 };
@@ -12,15 +13,13 @@ use noodles_core::{position::Position, region::Interval};
 use super::{Container, Reader};
 use crate::{crai, stats_record::StatsRecord};
 
-/// An iterator over records that intersect a given region.
-///
-/// This is created by calling [`Reader::query`].
+/// This is created by calling [`Reader::query_stats`].
 pub struct StatsQuery<'r, R>
 where
     R: Read + Seek,
 {
     reader: &'r mut Reader<R>,
-    target_candidates: vec::IntoIter<TargetCandidate>,
+    container_offsets: vec::IntoIter<u64>,
     interval: Interval,
     records: vec::IntoIter<StatsRecord>,
 }
@@ -35,19 +34,21 @@ where
         reference_sequence_id: usize,
         interval: Interval,
     ) -> Self {
-        let target_candidates = get_target_candidates(index, reference_sequence_id, interval);
+        let container_offsets =
+            prune_duplicate_container_targets(index, reference_sequence_id, interval);
 
         Self {
             reader,
-            target_candidates: target_candidates.into_iter(),
+            container_offsets: container_offsets.into_iter(),
             interval,
             records: Vec::new().into_iter(),
         }
     }
 
     fn read_next_container(&mut self) -> Option<io::Result<()>> {
-        let target = self.target_candidates.next()?;
-        if let Err(e) = self.reader.seek(SeekFrom::Start(target.container_offset)) {
+        let container_offset = self.container_offsets.next()?;
+
+        if let Err(e) = self.reader.seek(SeekFrom::Start(container_offset)) {
             return Some(Err(e));
         }
 
@@ -57,22 +58,20 @@ where
             Ok(0) => return None,
             Ok(_) => {}
             Err(e) => return Some(Err(e)),
-        };
+        }
 
         let compression_header = match container.compression_header() {
             Ok(compression_header) => compression_header,
             Err(e) => return Some(Err(e)),
         };
 
-        let records = target
-            .landmarks
-            .iter()
-            .map(|landmark| {
-                let slice = container.read_slice_at_landmark(*landmark)?;
+        let records = container
+            .slices()
+            .map(|result| {
+                let slice = result?;
 
                 let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
-                // Our refactored stats_records(...) peer to records(...)
-                // We build StatsRecord directly
+
                 slice.stats_records(&compression_header, &core_data_src, &external_data_srcs)
             })
             .collect::<io::Result<Vec<_>>>();
@@ -92,12 +91,9 @@ where
     }
 }
 
-// Drives the current stats query by loading candidate containers on demand and
-// filtering decoded records against the requested interval.
-//
-// This iterator is intentionally coupled to the minimal target-selection path
-// above and is expected to simplify once container and slice planning moves to
-// a higher-level layer.
+// Drives the stats query by loading each pruned candidate container on demand,
+// decoding all of its slices, and filtering records against the requested
+// interval.
 impl<R> Iterator for StatsQuery<'_, R>
 where
     R: Read + Seek,
@@ -107,11 +103,11 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.records.next() {
-                Some(record) => {
-                    if intersects(&record, self.interval) {
-                        return Some(Ok(record));
-                    }
-                }
+                Some(record) => match intersects(&record, self.interval) {
+                    Ok(true) => return Some(Ok(record)),
+                    Ok(false) => {}
+                    Err(e) => return Some(Err(e)),
+                },
                 None => match self.read_next_container() {
                     Some(Ok(())) => {}
                     Some(Err(e)) => return Some(Err(e)),
@@ -123,73 +119,40 @@ where
 }
 
 // Applies the final record-level interval filter for the current stats query.
-//
-// This complements the coarse CRAI-based candidate selection above. The
-// filtering responsibility may move once target planning is centralized at a
-// higher level.
-pub(crate) fn intersects(record: &StatsRecord, region_interval: Interval) -> bool {
-    let (Some(start), Some(span)) = (record.alignment_start, record.alignment_span) else {
-        return false;
+pub(crate) fn intersects(record: &StatsRecord, region_interval: Interval) -> io::Result<bool> {
+    let Some(start) = record.alignment_start() else {
+        return Ok(false);
     };
-    let Some(end) = usize::from(start)
-        .checked_add(span)
-        .and_then(|n| n.checked_sub(1))
-        .and_then(Position::new)
-    else {
-        return false;
+
+    let Some(end) = record.alignment_end()? else {
+        return Ok(false);
     };
+
     let alignment_interval = (start..=end).into();
-    region_interval.intersects(alignment_interval)
+
+    Ok(region_interval.intersects(alignment_interval))
 }
 
-// A minimal container/slice selection result used by the current stats query
-// path. Target planning is expected to move to a higher-level layer once the
-// direct stats decoding path is fully integrated.
-#[derive(Eq, PartialEq)]
-pub(crate) struct TargetCandidate {
-    pub(crate) container_offset: u64,
-    pub(crate) landmarks: Vec<u64>,
-}
-
-// Selects the CRAI-backed container offsets and slice landmarks needed by the
-// current regional stats query.
-//
-// This intentionally keeps planning local and simple. More general target
-// planning, including coalescing and remote-aware execution, is expected to be
-// handled by a higher-level layer.
-pub(crate) fn get_target_candidates(
+// Returns the unique container offsets whose CRAI records intersect the
+// requested reference sequence and interval.
+pub(crate) fn prune_duplicate_container_targets(
     index: &crai::Index,
-    reference_seq_id: usize,
+    reference_sequence_id: usize,
     interval: Interval,
-) -> Vec<TargetCandidate> {
-    let mut candidates: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-
-    for record in index.iter().filter(|record| {
-        record.reference_sequence_id() == Some(reference_seq_id)
-            && crai_record_intersects(record, interval)
-    }) {
-        candidates
-            .entry(record.offset())
-            .or_default()
-            .push(record.landmark());
-    }
-
-    candidates
-        .into_iter()
-        .map(|(container_offset, mut landmarks)| {
-            landmarks.sort_unstable();
-            landmarks.dedup();
-
-            TargetCandidate {
-                container_offset,
-                landmarks,
-            }
+) -> Vec<u64> {
+    index
+        .iter()
+        .filter(|record| {
+            record.reference_sequence_id() == Some(reference_sequence_id)
+                && crai_record_intersects(record, interval)
         })
+        .map(crai::Record::offset)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 
-// Similarly, this will be refactored into a more generic function
-// in a higher level layer.
+// Returns whether a CRAI slice record overlaps the requested interval.
 fn crai_record_intersects(record: &crai::Record, interval: Interval) -> bool {
     let Some(start) = record.alignment_start() else {
         return false;

@@ -7,7 +7,9 @@ pub mod header;
 pub(crate) mod num;
 mod query;
 mod records;
+mod selective;
 pub(crate) mod stats_query;
+mod stats_records;
 
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -16,8 +18,12 @@ use noodles_fasta as fasta;
 use noodles_sam as sam;
 
 pub use self::stats_query::StatsQuery;
-pub use self::{builder::Builder, container::Container, query::Query, records::Records};
+pub use self::{
+    builder::Builder, container::Container, query::Query, records::Records,
+    stats_records::StatsRecords,
+};
 use self::{container::read_container, header::read_header};
+pub use crate::container::Header;
 use crate::{FileDefinition, crai};
 
 /// A CRAM reader.
@@ -252,6 +258,29 @@ where
     /// ```
     pub fn records<'r, 'h: 'r>(&'r mut self, header: &'h sam::Header) -> Records<'r, 'h, R> {
         Records::new(self, header)
+    }
+
+    /// Returns an iterator over stats records starting from the current stream position.
+    ///
+    /// The stream is expected to be at the start of a container.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::{fs::File, io};
+    /// use noodles_cram as cram;
+    ///
+    /// let mut reader = File::open("sample.cram").map(cram::io::Reader::new)?;
+    /// let _ = reader.read_header()?;
+    ///
+    /// for result in reader.stats_records() {
+    ///     let record = result?;
+    ///     // ...
+    /// }
+    /// # Ok::<_, io::Error>(())
+    /// ```
+    pub fn stats_records<'r>(&'r mut self) -> StatsRecords<'r, R> {
+        StatsRecords::new(self)
     }
 }
 
