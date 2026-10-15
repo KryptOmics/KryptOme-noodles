@@ -4,11 +4,14 @@ pub mod header;
 pub mod slice;
 
 use std::{
-    io::{self, Read},
+    io::{self, Read, Seek},
     iter,
 };
 
-use self::{block::read_block_as, header::read_header};
+use self::{
+    block::read_block_as,
+    header::{read_byte_len_upper_bound, read_header},
+};
 pub use self::{compression_header::read_compression_header, slice::Slice, slice::read_slice};
 use crate::container::{CompressionHeader, Header};
 
@@ -113,4 +116,16 @@ where
     R: Read,
 {
     read_header(reader, header)
+}
+
+/// Fork-extension: Returns an upper bound on the encoded byte length of a complete CRAM
+/// container.
+///
+/// The reader must be positioned at the beginning of a container header. On
+/// success, it is positioned immediately after the encoded landmark count.
+pub(crate) fn read_container_byte_len_upper_bound<R>(reader: &mut R) -> io::Result<usize>
+where
+    R: Read + Seek,
+{
+    read_byte_len_upper_bound(reader)
 }

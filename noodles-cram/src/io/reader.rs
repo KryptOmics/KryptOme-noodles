@@ -19,8 +19,8 @@ use noodles_sam as sam;
 
 pub use self::stats_query::StatsQuery;
 pub use self::{
-    builder::Builder, container::Container, query::Query, records::Records,
-    stats_records::StatsRecords,
+    builder::Builder, container::Container, container::header::CONTAINER_HEADER_PREFIX_MAX_LEN,
+    query::Query, records::Records, stats_records::StatsRecords,
 };
 use self::{container::read_container, header::read_header};
 pub use crate::container::Header;

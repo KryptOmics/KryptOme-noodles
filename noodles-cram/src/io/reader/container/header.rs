@@ -1,6 +1,10 @@
-use std::io::{self, Read};
+mod layout;
+
+use std::io::{self, Read, Seek};
 
 use flate2::CrcReader;
+
+pub use self::layout::CONTAINER_HEADER_PREFIX_MAX_LEN;
 
 use crate::{
     container::{Header, ReferenceSequenceContext},
@@ -100,6 +104,13 @@ pub(crate) fn is_eof(
         && alignment_start == EOF_ALIGNMENT_START
         && block_count == EOF_BLOCK_COUNT
         && crc32 == EOF_CRC32
+}
+
+pub(super) fn read_byte_len_upper_bound<R>(reader: &mut R) -> io::Result<usize>
+where
+    R: Read + Seek,
+{
+    layout::read_byte_len_upper_bound(reader)
 }
 
 #[cfg(test)]
