@@ -2,7 +2,10 @@ use std::io::{self, Read, Seek};
 
 use super::{
     Reader,
-    container::{read_compression_header, read_container_header, read_slice},
+    container::{
+        read_compression_header, read_container_byte_len_upper_bound, read_container_header,
+        read_slice,
+    },
 };
 use crate::{
     StatsRecord,
@@ -20,6 +23,23 @@ where
     /// denotes the CRAM EOF container.
     pub fn read_container_header(&mut self, header: &mut Header) -> io::Result<usize> {
         read_container_header(&mut self.inner, header)
+    }
+
+    /// Fork-extension: Returns an upper bound on the encoded length of a CRAM
+    /// container header.
+    ///
+    /// The reader must be positioned at the beginning of a container header. This
+    /// reads only through the landmark count; it does not read the landmarks,
+    /// validate the header CRC, or otherwise replace [`Self::read_container_header`].
+    ///
+    /// [`CONTAINER_HEADER_PREFIX_MAX_LEN`](super::CONTAINER_HEADER_PREFIX_MAX_LEN)
+    /// bytes from the start of a structurally valid container header are sufficient
+    /// to perform this inspection.
+    ///
+    /// On success, the reader is positioned immediately after the encoded landmark
+    /// count.
+    pub fn read_container_byte_len_upper_bound(&mut self) -> io::Result<usize> {
+        read_container_byte_len_upper_bound(&mut self.inner)
     }
 
     /// Fork-extension: Reads and decodes the compression-header block from

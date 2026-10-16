@@ -4,6 +4,9 @@ mod version;
 
 pub use self::version::Version;
 
+/// The encoded length of a CRAM file definition, in bytes.
+pub const FILE_DEFINITION_LEN: usize = 26;
+
 /// A CRAM file definition.
 ///
 /// The CRAM file definition holds the format version and file ID. See § 6 File definition
