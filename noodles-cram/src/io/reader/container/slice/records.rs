@@ -17,6 +17,8 @@ use crate::{
     io::BitReader,
     record::{Feature, Flags, MateFlags, feature},
     stats_record::StatsFeature,
+    stats_record::position_to_nonzero_u64,
+    stats_record::usize_to_u64,
 };
 
 #[allow(clippy::enum_variant_names)]
@@ -77,7 +79,8 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
         record.bam_flags = self.read_bam_flags()?;
         let cram_flags = self.read_cram_flags()?;
 
-        self.read_stats_positions(record)?;
+        // self.read_stats_positions(record)?;
+        let alignment_start = self.read_stats_positions(record)?;
         self.skip_names()?;
         self.read_stats_mate(record, cram_flags)?;
         self.skip_data()?;
@@ -89,7 +92,7 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
         }
 
         self.id += 1;
-        self.prev_alignment_start = record.alignment_start;
+        self.prev_alignment_start = alignment_start;
 
         Ok(())
     }
@@ -141,7 +144,7 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             .map(Flags::from)
     }
 
-    fn read_stats_positions(&mut self, record: &mut StatsRecord) -> io::Result<()> {
+    fn read_stats_positions(&mut self, record: &mut StatsRecord) -> io::Result<Option<Position>> {
         record.reference_id = match self.reference_sequence_context {
             ReferenceSequenceContext::Some(context) => Some(context.reference_sequence_id()),
             ReferenceSequenceContext::None => None,
@@ -149,13 +152,14 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
         };
 
         record.read_length = self.read_read_length()?;
-        record.alignment_start = self.read_alignment_start()?;
+        let alignment_start = self.read_alignment_start()?;
+        record.alignment_start = alignment_start.map(position_to_nonzero_u64);
 
         // StatsRecord does not use read group, but this data series still
         // belongs to the current CRAM stream and must be consumed
         let _ = self.read_read_group_id()?;
 
-        Ok(())
+        Ok(alignment_start)
     }
 
     fn read_positions(&mut self, record: &mut Record) -> io::Result<()> {
@@ -307,7 +311,9 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
             }
 
             record.mate_reference_id = self.read_mate_reference_sequence_id()?;
-            record.mate_alignment_start = self.read_mate_alignment_start()?;
+            record.mate_alignment_start = self
+                .read_mate_alignment_start()?
+                .map(position_to_nonzero_u64);
             record.template_length = self.read_template_length()?;
         } else if cram_flags.mate_is_downstream() {
             record.mate_distance = self.read_mate_distance().map(Some)?;
@@ -492,7 +498,7 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
     ) -> io::Result<()> {
         let feature_count = self.read_feature_count()?;
 
-        let mut alignment_span = record.read_length;
+        let mut alignment_span = usize_to_u64(record.read_length);
         let mut prev_position = 0;
 
         for _ in 0..feature_count {
@@ -551,7 +557,7 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
     fn read_stats_feature(
         &mut self,
         prev_position: usize,
-        alignment_span: &mut usize,
+        alignment_span: &mut u64,
     ) -> io::Result<StatsFeature> {
         use feature::Code;
 
@@ -912,7 +918,8 @@ fn missing_data_series_encoding_error(data_series: DataSeries) -> io::Error {
 }
 
 // helper for adding to alignment span
-fn checked_add_span(span: &mut usize, n: usize) -> io::Result<()> {
+fn checked_add_span(span: &mut u64, n: usize) -> io::Result<()> {
+    let n = usize_to_u64(n);
     *span = span
         .checked_add(n)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "alignment span overflow"))?;
@@ -921,7 +928,8 @@ fn checked_add_span(span: &mut usize, n: usize) -> io::Result<()> {
 }
 
 // helper for subtracting to alignment span
-fn checked_sub_span(span: &mut usize, n: usize) -> io::Result<()> {
+fn checked_sub_span(span: &mut u64, n: usize) -> io::Result<()> {
+    let n = usize_to_u64(n);
     *span = span
         .checked_sub(n)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "alignment span underflow"))?;

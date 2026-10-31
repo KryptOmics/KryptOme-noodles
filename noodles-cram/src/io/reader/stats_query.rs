@@ -11,7 +11,10 @@ use std::{
 use noodles_core::{position::Position, region::Interval};
 
 use super::{Container, Reader};
-use crate::{crai, stats_record::StatsRecord};
+use crate::{
+    crai,
+    stats_record::{StatsRecord, usize_to_u64},
+};
 
 /// This is created by calling [`Reader::query_stats`].
 pub struct StatsQuery<'r, R>
@@ -128,9 +131,23 @@ pub(crate) fn intersects(record: &StatsRecord, region_interval: Interval) -> io:
         return Ok(false);
     };
 
-    let alignment_interval = (start..=end).into();
+    if let Some(region_start) = region_interval.start() {
+        let region_start = usize_to_u64(region_start.get());
 
-    Ok(region_interval.intersects(alignment_interval))
+        if end.get() < region_start {
+            return Ok(false);
+        }
+    }
+
+    if let Some(region_end) = region_interval.end() {
+        let region_end = usize_to_u64(region_end.get());
+
+        if start.get() > region_end {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 // Returns the unique container offsets whose CRAI records intersect the
@@ -169,4 +186,117 @@ fn crai_record_intersects(record: &crai::Record, interval: Interval) -> bool {
     let slice_interval = (start..=end).into();
 
     interval.intersects(slice_interval)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use noodles_core::{Position, region::Interval};
+
+    use super::*;
+
+    fn stats_record(start: u64, end: u64) -> StatsRecord {
+        StatsRecord {
+            alignment_start: NonZeroU64::new(start),
+            alignment_span: Some(end - start + 1),
+            ..Default::default()
+        }
+    }
+
+    fn position(n: usize) -> Position {
+        Position::try_from(n).unwrap()
+    }
+
+    #[test]
+    fn test_intersects_bounded_interval() -> io::Result<()> {
+        let record = stats_record(10, 20);
+
+        assert!(intersects(
+            &record,
+            Interval::from(position(10)..=position(20)),
+        )?);
+
+        // Inclusive boundary.
+        assert!(intersects(
+            &record,
+            Interval::from(position(20)..=position(30)),
+        )?);
+
+        assert!(!intersects(
+            &record,
+            Interval::from(position(21)..=position(30)),
+        )?);
+
+        assert!(!intersects(
+            &record,
+            Interval::from(position(1)..=position(9)),
+        )?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_intersects_unbounded_start() -> io::Result<()> {
+        let record = stats_record(10, 20);
+
+        assert!(intersects(&record, Interval::from(..=position(10)),)?);
+
+        assert!(!intersects(&record, Interval::from(..=position(9)),)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_intersects_unbounded_end() -> io::Result<()> {
+        let record = stats_record(10, 20);
+
+        assert!(intersects(&record, Interval::from(position(20)..),)?);
+
+        assert!(!intersects(&record, Interval::from(position(21)..),)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_intersects_unbounded_interval() -> io::Result<()> {
+        let record = stats_record(10, 20);
+
+        assert!(intersects(&record, Interval::from(..))?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_intersects_record_without_alignment_start() -> io::Result<()> {
+        let record = StatsRecord::default();
+
+        assert!(!intersects(
+            &record,
+            Interval::from(position(1)..=position(10)),
+        )?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_intersects_zero_alignment_span() -> io::Result<()> {
+        let record = StatsRecord {
+            alignment_start: NonZeroU64::new(10),
+            alignment_span: Some(0),
+            ..Default::default()
+        };
+
+        assert!(intersects(
+            &record,
+            Interval::from(position(10)..=position(10)),
+        )?);
+
+        assert!(!intersects(
+            &record,
+            Interval::from(position(11)..=position(20)),
+        )?);
+
+        Ok(())
+    }
 }

@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, num::NonZeroU64};
 
 use crate::Record;
 use crate::record::Feature;
@@ -10,13 +10,13 @@ use noodles_sam::{self as sam, alignment::Record as _};
 pub struct StatsRecord {
     pub(crate) bam_flags: sam::alignment::record::Flags,
     pub(crate) reference_id: Option<usize>,
-    pub(crate) alignment_start: Option<Position>,
-    pub(crate) alignment_span: Option<usize>,
+    pub(crate) alignment_start: Option<NonZeroU64>,
+    pub(crate) alignment_span: Option<u64>,
     pub(crate) mapping_quality: Option<sam::alignment::record::MappingQuality>,
     pub(crate) template_length: i32,
     pub(crate) mate_distance: Option<usize>,
     pub(crate) mate_reference_id: Option<usize>,
-    pub(crate) mate_alignment_start: Option<Position>,
+    pub(crate) mate_alignment_start: Option<NonZeroU64>,
     pub(crate) read_length: usize,
     pub(crate) features: Vec<StatsFeature>,
 }
@@ -37,6 +37,14 @@ impl Default for StatsRecord {
             features: Vec::new(),
         }
     }
+}
+
+pub(crate) fn usize_to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("usize must fit in u64 on supported targets")
+}
+
+pub(crate) fn position_to_nonzero_u64(position: Position) -> NonZeroU64 {
+    NonZeroU64::new(usize_to_u64(position.get())).expect("noodles Position must be nonzero")
 }
 
 impl StatsRecord {
@@ -80,16 +88,35 @@ impl StatsRecord {
             })
             .collect::<Vec<_>>();
 
+        let bam_flags = record.flags()?;
+
+        let alignment_span = if bam_flags.is_unmapped() {
+            None
+        } else {
+            record.alignment_span().transpose()?.map(usize_to_u64)
+        };
+
         Ok(Self {
-            bam_flags: record.flags()?,
+            bam_flags,
             reference_id: record.reference_sequence_id(header).transpose()?,
-            alignment_start: record.alignment_start().transpose()?,
-            alignment_span: record.alignment_span().transpose()?,
+
+            alignment_start: record
+                .alignment_start()
+                .transpose()?
+                .map(position_to_nonzero_u64),
+
+            alignment_span,
+
             mapping_quality: record.mapping_quality().transpose()?,
             template_length: record.template_length()?,
             mate_distance: record.mate_distance,
             mate_reference_id: record.mate_reference_sequence_id(header).transpose()?,
-            mate_alignment_start: record.mate_alignment_start().transpose()?,
+
+            mate_alignment_start: record
+                .mate_alignment_start()
+                .transpose()?
+                .map(position_to_nonzero_u64),
+
             read_length: record.read_length,
             features: stats_features,
         })
@@ -106,17 +133,17 @@ impl StatsRecord {
     }
 
     /// Returns the alignment start.
-    pub fn alignment_start(&self) -> Option<Position> {
+    pub fn alignment_start(&self) -> Option<NonZeroU64> {
         self.alignment_start
     }
 
     /// Return the alignment span.
-    pub fn alignment_span(&self) -> Option<usize> {
+    pub fn alignment_span(&self) -> Option<u64> {
         self.alignment_span
     }
 
     /// Return the alignment end.
-    pub fn alignment_end(&self) -> io::Result<Option<Position>> {
+    pub fn alignment_end(&self) -> io::Result<Option<NonZeroU64>> {
         let Some(start) = self.alignment_start else {
             return Ok(None);
         };
@@ -155,7 +182,7 @@ impl StatsRecord {
     }
 
     /// Returns the mate's alignment start.
-    pub fn mate_alignment_start(&self) -> Option<Position> {
+    pub fn mate_alignment_start(&self) -> Option<NonZeroU64> {
         self.mate_alignment_start
     }
 
