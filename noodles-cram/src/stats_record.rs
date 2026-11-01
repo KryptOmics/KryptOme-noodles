@@ -5,7 +5,11 @@ use crate::record::Feature;
 use noodles_core::Position;
 use noodles_sam::{self as sam, alignment::Record as _};
 
-/// A CRAM record without reference.
+/// A compact CRAM record for reference-free statistics and selective queries.
+///
+/// Absolute genomic positions and spans use fixed-width 64-bit types. Other
+/// record-local values, such as read lengths and mate distances, retain their
+/// native indexing types.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StatsRecord {
     pub(crate) bam_flags: sam::alignment::record::Flags,
@@ -132,17 +136,23 @@ impl StatsRecord {
         self.reference_id
     }
 
-    /// Returns the alignment start.
+    /// Returns the 1-based alignment start.
     pub fn alignment_start(&self) -> Option<NonZeroU64> {
         self.alignment_start
     }
 
-    /// Return the alignment span.
+    /// Returns the alignment span in reference bases.
     pub fn alignment_span(&self) -> Option<u64> {
         self.alignment_span
     }
 
-    /// Return the alignment end.
+    /// Returns the 1-based inclusive alignment end.
+    ///
+    /// If the alignment span is absent or zero, this returns the alignment start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if calculating the alignment end overflows `u64`.
     pub fn alignment_end(&self) -> io::Result<Option<NonZeroU64>> {
         let Some(start) = self.alignment_start else {
             return Ok(None);
@@ -181,7 +191,7 @@ impl StatsRecord {
         self.mate_reference_id
     }
 
-    /// Returns the mate's alignment start.
+    /// Returns the mate's 1-based alignment start.
     pub fn mate_alignment_start(&self) -> Option<NonZeroU64> {
         self.mate_alignment_start
     }
