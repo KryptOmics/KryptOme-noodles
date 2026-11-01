@@ -1,7 +1,7 @@
 mod header;
 pub mod records;
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::{borrow::Cow, io, num::NonZeroU64, sync::Arc};
 
 use noodles_core::Position;
 use noodles_fasta as fasta;
@@ -360,7 +360,7 @@ fn resolve_stats_mates(records: &mut [StatsRecord]) -> io::Result<()> {
 
             // We do not create an additional set_stats_mate wrapper
             // This is what set_mate calls
-            set_mate_chunk(
+            set_stats_mate_chunk(
                 &mut record.bam_flags,
                 &mut record.mate_reference_id,
                 &mut record.mate_alignment_start,
@@ -382,7 +382,7 @@ fn resolve_stats_mates(records: &mut [StatsRecord]) -> io::Result<()> {
         let record = &mut right[0];
         let mate = &mut left[i];
 
-        set_mate_chunk(
+        set_stats_mate_chunk(
             &mut record.bam_flags,
             &mut record.mate_reference_id,
             &mut record.mate_alignment_start,
@@ -490,7 +490,7 @@ fn calculate_stats_template_length(record: &StatsRecord, mate: &StatsRecord) -> 
     let Some(start) = record
         .alignment_start
         .min(mate.alignment_start)
-        .map(usize::from)
+        .map(NonZeroU64::get)
     else {
         return Ok(0);
     };
@@ -508,7 +508,7 @@ fn calculate_stats_template_length(record: &StatsRecord, mate: &StatsRecord) -> 
         return Ok(0);
     };
 
-    let end = usize::from(record_alignment_end.max(mate_alignment_end));
+    let end = record_alignment_end.max(mate_alignment_end).get();
 
     // This is where we are different from calculate_template_length(...)
     // `start` is the minimum alignment start and `end` is the maximum
@@ -530,6 +530,27 @@ fn calculate_template_length(record: &Record, mate: &Record) -> i32 {
         mate.read_length,
         &mate.features,
     )
+}
+
+fn set_stats_mate_chunk(
+    record_bam_flags: &mut sam::alignment::record::Flags,
+    record_mate_reference_sequence_id: &mut Option<usize>,
+    record_mate_alignment_start: &mut Option<NonZeroU64>,
+    mate_bam_flags: sam::alignment::record::Flags,
+    mate_reference_sequence_id: Option<usize>,
+    mate_alignment_start: Option<NonZeroU64>,
+) {
+    if mate_bam_flags.is_reverse_complemented() {
+        *record_bam_flags |= sam::alignment::record::Flags::MATE_REVERSE_COMPLEMENTED;
+    }
+
+    if mate_bam_flags.is_unmapped() {
+        *record_bam_flags |= sam::alignment::record::Flags::MATE_UNMAPPED;
+    }
+
+    *record_mate_reference_sequence_id = mate_reference_sequence_id;
+
+    *record_mate_alignment_start = mate_alignment_start;
 }
 
 fn set_mate_chunk(
@@ -870,7 +891,7 @@ mod tests {
             StatsRecord {
                 bam_flags: sam::alignment::record::Flags::empty(),
                 reference_id: Some(2),
-                alignment_start: Position::new(5),
+                alignment_start: NonZeroU64::new(5),
                 alignment_span: Some(4),
                 mate_distance: Some(0),
                 read_length: 4,
@@ -879,7 +900,7 @@ mod tests {
             StatsRecord {
                 bam_flags: sam::alignment::record::Flags::empty(),
                 reference_id: Some(2),
-                alignment_start: Position::new(8),
+                alignment_start: NonZeroU64::new(8),
                 alignment_span: Some(4),
                 mate_distance: Some(1),
                 read_length: 4,
@@ -889,7 +910,7 @@ mod tests {
             StatsRecord {
                 bam_flags: sam::alignment::record::Flags::empty(),
                 reference_id: Some(2),
-                alignment_start: Position::new(13),
+                alignment_start: NonZeroU64::new(13),
                 alignment_span: Some(4),
                 read_length: 4,
                 ..Default::default()
@@ -916,14 +937,14 @@ mod tests {
     #[test]
     fn test_calculate_stats_template_length() -> io::Result<()> {
         let record = StatsRecord {
-            alignment_start: Position::new(100),
+            alignment_start: NonZeroU64::new(100),
             alignment_span: Some(50),
             read_length: 50,
             ..Default::default()
         };
 
         let mate = StatsRecord {
-            alignment_start: Position::new(200),
+            alignment_start: NonZeroU64::new(200),
             alignment_span: Some(50),
             read_length: 50,
             ..Default::default()

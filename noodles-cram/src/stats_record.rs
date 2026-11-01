@@ -1,22 +1,26 @@
-use std::io;
+use std::{io, num::NonZeroU64};
 
 use crate::Record;
 use crate::record::Feature;
 use noodles_core::Position;
 use noodles_sam::{self as sam, alignment::Record as _};
 
-/// A CRAM record without reference.
+/// A compact CRAM record for reference-free statistics and selective queries.
+///
+/// Absolute genomic positions and spans use fixed-width 64-bit types. Other
+/// record-local values, such as read lengths and mate distances, retain their
+/// native indexing types.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StatsRecord {
     pub(crate) bam_flags: sam::alignment::record::Flags,
     pub(crate) reference_id: Option<usize>,
-    pub(crate) alignment_start: Option<Position>,
-    pub(crate) alignment_span: Option<usize>,
+    pub(crate) alignment_start: Option<NonZeroU64>,
+    pub(crate) alignment_span: Option<u64>,
     pub(crate) mapping_quality: Option<sam::alignment::record::MappingQuality>,
     pub(crate) template_length: i32,
     pub(crate) mate_distance: Option<usize>,
     pub(crate) mate_reference_id: Option<usize>,
-    pub(crate) mate_alignment_start: Option<Position>,
+    pub(crate) mate_alignment_start: Option<NonZeroU64>,
     pub(crate) read_length: usize,
     pub(crate) features: Vec<StatsFeature>,
 }
@@ -37,6 +41,14 @@ impl Default for StatsRecord {
             features: Vec::new(),
         }
     }
+}
+
+pub(crate) fn usize_to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("usize must fit in u64 on supported targets")
+}
+
+pub(crate) fn position_to_nonzero_u64(position: Position) -> NonZeroU64 {
+    NonZeroU64::new(usize_to_u64(position.get())).expect("noodles Position must be nonzero")
 }
 
 impl StatsRecord {
@@ -80,16 +92,35 @@ impl StatsRecord {
             })
             .collect::<Vec<_>>();
 
+        let bam_flags = record.flags()?;
+
+        let alignment_span = if bam_flags.is_unmapped() {
+            None
+        } else {
+            record.alignment_span().transpose()?.map(usize_to_u64)
+        };
+
         Ok(Self {
-            bam_flags: record.flags()?,
+            bam_flags,
             reference_id: record.reference_sequence_id(header).transpose()?,
-            alignment_start: record.alignment_start().transpose()?,
-            alignment_span: record.alignment_span().transpose()?,
+
+            alignment_start: record
+                .alignment_start()
+                .transpose()?
+                .map(position_to_nonzero_u64),
+
+            alignment_span,
+
             mapping_quality: record.mapping_quality().transpose()?,
             template_length: record.template_length()?,
             mate_distance: record.mate_distance,
             mate_reference_id: record.mate_reference_sequence_id(header).transpose()?,
-            mate_alignment_start: record.mate_alignment_start().transpose()?,
+
+            mate_alignment_start: record
+                .mate_alignment_start()
+                .transpose()?
+                .map(position_to_nonzero_u64),
+
             read_length: record.read_length,
             features: stats_features,
         })
@@ -105,18 +136,24 @@ impl StatsRecord {
         self.reference_id
     }
 
-    /// Returns the alignment start.
-    pub fn alignment_start(&self) -> Option<Position> {
+    /// Returns the 1-based alignment start.
+    pub fn alignment_start(&self) -> Option<NonZeroU64> {
         self.alignment_start
     }
 
-    /// Return the alignment span.
-    pub fn alignment_span(&self) -> Option<usize> {
+    /// Returns the alignment span in reference bases.
+    pub fn alignment_span(&self) -> Option<u64> {
         self.alignment_span
     }
 
-    /// Return the alignment end.
-    pub fn alignment_end(&self) -> io::Result<Option<Position>> {
+    /// Returns the 1-based inclusive alignment end.
+    ///
+    /// If the alignment span is absent or zero, this returns the alignment start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if calculating the alignment end overflows `u64`.
+    pub fn alignment_end(&self) -> io::Result<Option<NonZeroU64>> {
         let Some(start) = self.alignment_start else {
             return Ok(None);
         };
@@ -154,8 +191,8 @@ impl StatsRecord {
         self.mate_reference_id
     }
 
-    /// Returns the mate's alignment start.
-    pub fn mate_alignment_start(&self) -> Option<Position> {
+    /// Returns the mate's 1-based alignment start.
+    pub fn mate_alignment_start(&self) -> Option<NonZeroU64> {
         self.mate_alignment_start
     }
 
@@ -339,6 +376,10 @@ impl FeatureSummary {
 mod tests {
     use super::*;
 
+    fn position(n: u64) -> NonZeroU64 {
+        NonZeroU64::new(n).unwrap()
+    }
+
     #[test]
     fn test_stats_feature_position() {
         let position = Position::try_from(42).unwrap();
@@ -456,5 +497,87 @@ mod tests {
         let record = StatsRecord::default();
 
         assert_eq!(record.feature_summary(), None);
+    }
+
+    #[test]
+    fn test_alignment_end_without_start() -> io::Result<()> {
+        let record = StatsRecord {
+            alignment_start: None,
+            alignment_span: Some(100),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_without_span() -> io::Result<()> {
+        let start = position(100);
+
+        let record = StatsRecord {
+            alignment_start: Some(start),
+            alignment_span: None,
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(start));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_with_zero_span() -> io::Result<()> {
+        let start = position(100);
+
+        let record = StatsRecord {
+            alignment_start: Some(start),
+            alignment_span: Some(0),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(start));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end() -> io::Result<()> {
+        let record = StatsRecord {
+            alignment_start: Some(position(100)),
+            alignment_span: Some(50),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(position(149)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_at_u64_max() -> io::Result<()> {
+        let record = StatsRecord {
+            alignment_start: Some(position(u64::MAX)),
+            alignment_span: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(position(u64::MAX)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_overflow() {
+        let record = StatsRecord {
+            alignment_start: Some(position(u64::MAX)),
+            alignment_span: Some(2),
+            ..Default::default()
+        };
+
+        let err = record.alignment_end().unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

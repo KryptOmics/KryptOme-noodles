@@ -2,13 +2,14 @@
 use std::{
     fs::File,
     io::{self, SeekFrom},
+    num::NonZeroU64,
     path::PathBuf,
 };
 
 use noodles_core::{Position, Region};
 use noodles_cram::{self as cram, StatsRecord, container::Header, io::reader::Container};
 use noodles_fasta::{self as fasta, repository::adapters::IndexedReader};
-use noodles_sam::{self as sam, alignment::Record as _};
+use noodles_sam as sam;
 
 #[test]
 /// Tests that direct stats decoding matches the native full-record path.
@@ -32,6 +33,10 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
 
     let mut container = Container::default();
     let mut container_index = 0;
+
+    let mut saw_mapped_coordinates = false;
+    let mut saw_unmapped_record = false;
+    let mut saw_mate_alignment_start = false;
 
     while reader.read_container(&mut container)? != 0 {
         let compression_header = container.compression_header()?;
@@ -69,6 +74,18 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
             for (record_index, (actual_record, expected_record)) in
                 actual.iter().zip(&expected).enumerate()
             {
+                if actual_record.bam_flags().is_unmapped() {
+                    saw_unmapped_record = true;
+                } else if actual_record.alignment_start().is_some()
+                    && actual_record.alignment_span().is_some()
+                {
+                    saw_mapped_coordinates = true;
+                }
+
+                if actual_record.mate_alignment_start().is_some() {
+                    saw_mate_alignment_start = true;
+                }
+
                 assert_stats_record_matches_full_record(
                     actual_record,
                     expected_record,
@@ -82,6 +99,21 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
 
         container_index += 1;
     }
+
+    assert!(
+        saw_mapped_coordinates,
+        "fixture must exercise mapped stats coordinates"
+    );
+
+    assert!(
+        saw_unmapped_record,
+        "fixture must exercise unmapped stats-record semantics"
+    );
+
+    assert!(
+        saw_mate_alignment_start,
+        "fixture must exercise mate alignment coordinates"
+    );
 
     Ok(())
 }
@@ -97,63 +129,9 @@ fn assert_stats_record_matches_full_record(
     let context =
         format!("container {container_index}, slice {slice_index}, record {record_index}");
 
-    assert_eq!(
-        actual.bam_flags(),
-        expected.flags()?,
-        "{context}: bam_flags"
-    );
+    let expected = StatsRecord::try_from_full_record(header, expected)?;
 
-    assert_eq!(
-        actual.reference_id(),
-        expected.reference_sequence_id(header).transpose()?,
-        "{context}: reference_id"
-    );
-
-    assert_eq!(
-        actual.alignment_start(),
-        expected.alignment_start().transpose()?,
-        "{context}: alignment_start"
-    );
-
-    if actual.bam_flags().is_unmapped() {
-        assert_eq!(actual.alignment_span(), None, "{context}: alignment_span");
-    } else {
-        assert_eq!(
-            actual.alignment_span(),
-            expected.alignment_span().transpose()?,
-            "{context}: alignment_span"
-        );
-    }
-
-    assert_eq!(
-        actual.mapping_quality(),
-        expected.mapping_quality().transpose()?,
-        "{context}: mapping_quality"
-    );
-
-    assert_eq!(
-        actual.template_length(),
-        expected.template_length()?,
-        "{context}: template_length"
-    );
-
-    assert_eq!(
-        actual.mate_reference_id(),
-        expected.mate_reference_sequence_id(header).transpose()?,
-        "{context}: mate_reference_id"
-    );
-
-    assert_eq!(
-        actual.mate_alignment_start(),
-        expected.mate_alignment_start().transpose()?,
-        "{context}: mate_alignment_start"
-    );
-
-    assert_eq!(
-        actual.read_length(),
-        expected.sequence().len(),
-        "{context}: read_length"
-    );
+    assert_eq!(actual, &expected, "{context}");
 
     Ok(())
 }
@@ -200,7 +178,11 @@ fn stats_records_until_without_boundary_matches_full_records() -> io::Result<()>
     Ok(())
 }
 
-fn is_past_boundary(record: &StatsRecord, reference_id: usize, alignment_start: Position) -> bool {
+fn is_past_boundary(
+    record: &StatsRecord,
+    reference_id: usize,
+    alignment_start: NonZeroU64,
+) -> bool {
     let Some(record_reference_id) = record.reference_id() else {
         return false;
     };
@@ -786,6 +768,39 @@ fn stats_records_iterator_matches_direct_stats_records() -> io::Result<()> {
     Ok(())
 }
 
+fn stats_record_intersects_interval(
+    record: &StatsRecord,
+    interval: noodles_core::region::Interval,
+) -> io::Result<bool> {
+    let Some(start) = record.alignment_start() else {
+        return Ok(false);
+    };
+
+    let Some(end) = record.alignment_end()? else {
+        return Ok(false);
+    };
+
+    if let Some(interval_start) = interval.start() {
+        let interval_start = u64::try_from(interval_start.get())
+            .expect("usize must fit in u64 on supported targets");
+
+        if end.get() < interval_start {
+            return Ok(false);
+        }
+    }
+
+    if let Some(interval_end) = interval.end() {
+        let interval_end =
+            u64::try_from(interval_end.get()).expect("usize must fit in u64 on supported targets");
+
+        if start.get() > interval_end {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 #[test]
 fn query_stats_matches_stats_records_for_region() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
@@ -848,17 +863,7 @@ fn query_stats_matches_stats_records_for_region() -> Result<(), Box<dyn std::err
             continue;
         }
 
-        let Some(alignment_start) = record.alignment_start() else {
-            continue;
-        };
-
-        let Some(alignment_end) = record.alignment_end()? else {
-            continue;
-        };
-
-        let alignment_interval = (alignment_start..=alignment_end).into();
-
-        if interval.intersects(alignment_interval) {
+        if stats_record_intersects_interval(&record, interval)? {
             expected.push(record);
         }
     }
