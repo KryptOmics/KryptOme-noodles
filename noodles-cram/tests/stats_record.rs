@@ -34,6 +34,10 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
     let mut container = Container::default();
     let mut container_index = 0;
 
+    let mut saw_mapped_coordinates = false;
+    let mut saw_unmapped_record = false;
+    let mut saw_mate_alignment_start = false;
+
     while reader.read_container(&mut container)? != 0 {
         let compression_header = container.compression_header()?;
 
@@ -70,6 +74,18 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
             for (record_index, (actual_record, expected_record)) in
                 actual.iter().zip(&expected).enumerate()
             {
+                if actual_record.bam_flags().is_unmapped() {
+                    saw_unmapped_record = true;
+                } else if actual_record.alignment_start().is_some()
+                    && actual_record.alignment_span().is_some()
+                {
+                    saw_mapped_coordinates = true;
+                }
+
+                if actual_record.mate_alignment_start().is_some() {
+                    saw_mate_alignment_start = true;
+                }
+
                 assert_stats_record_matches_full_record(
                     actual_record,
                     expected_record,
@@ -83,6 +99,21 @@ fn stats_records_match_full_records() -> Result<(), Box<dyn std::error::Error>> 
 
         container_index += 1;
     }
+
+    assert!(
+        saw_mapped_coordinates,
+        "fixture must exercise mapped stats coordinates"
+    );
+
+    assert!(
+        saw_unmapped_record,
+        "fixture must exercise unmapped stats-record semantics"
+    );
+
+    assert!(
+        saw_mate_alignment_start,
+        "fixture must exercise mate alignment coordinates"
+    );
 
     Ok(())
 }

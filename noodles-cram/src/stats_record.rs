@@ -366,6 +366,10 @@ impl FeatureSummary {
 mod tests {
     use super::*;
 
+    fn position(n: u64) -> NonZeroU64 {
+        NonZeroU64::new(n).unwrap()
+    }
+
     #[test]
     fn test_stats_feature_position() {
         let position = Position::try_from(42).unwrap();
@@ -483,5 +487,87 @@ mod tests {
         let record = StatsRecord::default();
 
         assert_eq!(record.feature_summary(), None);
+    }
+
+    #[test]
+    fn test_alignment_end_without_start() -> io::Result<()> {
+        let record = StatsRecord {
+            alignment_start: None,
+            alignment_span: Some(100),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_without_span() -> io::Result<()> {
+        let start = position(100);
+
+        let record = StatsRecord {
+            alignment_start: Some(start),
+            alignment_span: None,
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(start));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_with_zero_span() -> io::Result<()> {
+        let start = position(100);
+
+        let record = StatsRecord {
+            alignment_start: Some(start),
+            alignment_span: Some(0),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(start));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end() -> io::Result<()> {
+        let record = StatsRecord {
+            alignment_start: Some(position(100)),
+            alignment_span: Some(50),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(position(149)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_at_u64_max() -> io::Result<()> {
+        let record = StatsRecord {
+            alignment_start: Some(position(u64::MAX)),
+            alignment_span: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(record.alignment_end()?, Some(position(u64::MAX)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_alignment_end_overflow() {
+        let record = StatsRecord {
+            alignment_start: Some(position(u64::MAX)),
+            alignment_span: Some(2),
+            ..Default::default()
+        };
+
+        let err = record.alignment_end().unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
