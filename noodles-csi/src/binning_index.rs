@@ -7,7 +7,7 @@ mod reference_sequence;
 use std::io;
 
 use noodles_bgzf as bgzf;
-use noodles_core::region::Interval;
+use noodles_core::{Position, region::Interval};
 
 use self::index::{Header, reference_sequence::bin::Chunk};
 pub use self::{index::Index, indexer::Indexer, reference_sequence::ReferenceSequence};
@@ -38,6 +38,34 @@ pub trait BinningIndex {
     /// in an index.
     fn last_first_record_start_position(&self) -> Option<bgzf::VirtualPosition>;
 }
+
+/// Fork-extension: Fixed-width coordinate access for binning-index queries.
+///
+/// This keeps callers that use fixed-width coordinates from depending on
+/// noodles-core coordinate types while delegating all binning-index semantics
+/// to [`BinningIndex::query`].
+pub trait BinningIndexExt: BinningIndex {
+    /// Returns the chunks that overlap the given 1-based, inclusive interval.
+    fn query_u64(
+        &self,
+        reference_sequence_id: usize,
+        start: u64,
+        end: u64,
+    ) -> io::Result<Vec<Chunk>> {
+        fn position(n: u64) -> io::Result<Position> {
+            usize::try_from(n)
+                .and_then(Position::try_from)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        }
+
+        let start = position(start)?;
+        let end = position(end)?;
+
+        self.query(reference_sequence_id, (start..=end).into())
+    }
+}
+
+impl<I> BinningIndexExt for I where I: BinningIndex + ?Sized {}
 
 impl<I> BinningIndex for Box<I>
 where
