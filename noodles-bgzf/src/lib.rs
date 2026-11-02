@@ -35,6 +35,7 @@
 #[cfg(feature = "async")]
 pub mod r#async;
 
+pub mod block;
 pub(crate) mod deflate;
 mod gz;
 pub mod gzi;
