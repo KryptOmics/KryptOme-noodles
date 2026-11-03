@@ -10,9 +10,10 @@ use std::{fmt, io};
 
 use bstr::BStr;
 use noodles_core::Position;
+use noodles_core::region::Interval;
 use noodles_sam::{
     self as sam,
-    alignment::record::{Flags, MappingQuality},
+    alignment::record::{Flags, MappingQuality, Record as _},
 };
 
 pub use self::{cigar::Cigar, data::Data, quality_scores::QualityScores, sequence::Sequence};
@@ -184,6 +185,39 @@ impl Record {
         self.as_record_ref().data()
     }
 
+    /// Returns the reference interval used to calculate the BAM bin.
+    ///
+    /// Unmapped records and records whose CIGAR consumes no reference bases are
+    /// treated as having an alignment length of one.
+    pub fn binning_interval(&self) -> Option<io::Result<Interval>> {
+        let start = match self.alignment_start()? {
+            Ok(start) => start,
+            Err(e) => return Some(Err(e)),
+        };
+
+        let span = if self.flags().is_unmapped() {
+            1
+        } else {
+            match self.alignment_span().transpose() {
+                Ok(Some(span)) => span,
+                Ok(None) => 1,
+                Err(e) => return Some(Err(e)),
+            }
+        };
+
+        Some(
+            start
+                .checked_add(span - 1)
+                .map(|end| (start..=end).into())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "record binning interval end overflow",
+                    )
+                }),
+        )
+    }
+
     fn as_record_ref(&self) -> RecordRef<'_> {
         // SAFETY: The inner buffer was validated to look record-like on read.
         RecordRef::new_unchecked(&self.0)
@@ -324,7 +358,27 @@ pub(super) fn try_to_position(n: i32) -> io::Result<Position> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZero;
+
+    use noodles_sam::{
+        alignment::{
+            RecordBuf,
+            record::{
+                Flags,
+                cigar::{Op, op::Kind},
+            },
+            record_buf::{Cigar as CigarBuf, Sequence},
+        },
+        header::record::value::{Map, map::ReferenceSequence},
+    };
+
     use super::*;
+
+    fn encode_record(header: &sam::Header, record: &RecordBuf) -> io::Result<Record> {
+        let mut buf = Vec::new();
+        crate::record::codec::encode(&mut buf, header, record)?;
+        Ok(Record(buf))
+    }
 
     #[test]
     fn test_cigar_with_oversized_cigar() -> Result<(), Box<dyn std::error::Error>> {
@@ -378,5 +432,97 @@ mod tests {
         assert_eq!(record.cigar().len(), BASE_COUNT);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_binning_interval_with_mapped_record() -> Result<(), Box<dyn std::error::Error>> {
+        let header = sam::Header::builder()
+            .add_reference_sequence(
+                "sq0",
+                Map::<ReferenceSequence>::new(const { NonZero::new(100).unwrap() }),
+            )
+            .build();
+
+        let record = RecordBuf::builder()
+            .set_flags(Flags::empty())
+            .set_reference_sequence_id(0)
+            .set_alignment_start(Position::try_from(8)?)
+            .set_cigar(CigarBuf::from(vec![Op::new(Kind::Match, 5)]))
+            .set_sequence(Sequence::from(vec![b'A'; 5]))
+            .build();
+
+        let record = encode_record(&header, &record)?;
+
+        let actual = record.binning_interval().transpose()?;
+        let expected = Some((Position::try_from(8)?..=Position::try_from(12)?).into());
+
+        assert_eq!(actual, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_binning_interval_with_placed_unmapped_record() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let header = sam::Header::builder()
+            .add_reference_sequence(
+                "sq0",
+                Map::<ReferenceSequence>::new(const { NonZero::new(100).unwrap() }),
+            )
+            .build();
+
+        let record = RecordBuf::builder()
+            .set_flags(Flags::UNMAPPED)
+            .set_reference_sequence_id(0)
+            .set_alignment_start(Position::try_from(8)?)
+            // Deliberately reference-consuming. UNMAPPED must override this
+            // for BAM binning purposes.
+            .set_cigar(CigarBuf::from(vec![Op::new(Kind::Match, 5)]))
+            .set_sequence(Sequence::from(vec![b'A'; 5]))
+            .build();
+
+        let record = encode_record(&header, &record)?;
+
+        let actual = record.binning_interval().transpose()?;
+        let expected = Some((Position::try_from(8)?..=Position::try_from(8)?).into());
+
+        assert_eq!(actual, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_binning_interval_with_insertion_only_mapped_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let header = sam::Header::builder()
+            .add_reference_sequence(
+                "sq0",
+                Map::<ReferenceSequence>::new(const { NonZero::new(100).unwrap() }),
+            )
+            .build();
+
+        let record = RecordBuf::builder()
+            .set_flags(Flags::empty())
+            .set_reference_sequence_id(0)
+            .set_alignment_start(Position::try_from(8)?)
+            .set_cigar(CigarBuf::from(vec![Op::new(Kind::Insertion, 5)]))
+            .set_sequence(Sequence::from(vec![b'A'; 5]))
+            .build();
+
+        let record = encode_record(&header, &record)?;
+
+        let actual = record.binning_interval().transpose()?;
+        let expected = Some((Position::try_from(8)?..=Position::try_from(8)?).into());
+
+        assert_eq!(actual, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_binning_interval_with_unplaced_record() {
+        let record = Record::default();
+
+        assert!(record.binning_interval().is_none());
     }
 }
