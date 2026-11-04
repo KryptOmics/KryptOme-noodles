@@ -1,9 +1,11 @@
-//! BAM index abstraction.
+//! Fork-extension: BAM index abstraction.
 //!
 //! A BAM file can be indexed using either a BAM index (BAI) or coordinate-sorted index (CSI).
 //! This module provides a common representation for either index while preserving the existing
 //! [`noodles_csi::binning_index::BinningIndex`] interface.
 //!
+pub mod io;
+
 use noodles_csi::{
     self as csi,
     binning_index::{self, BinningIndex},
