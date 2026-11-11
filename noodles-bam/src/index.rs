@@ -83,6 +83,24 @@ impl BinningIndex for Index {
     }
 }
 
+impl Index {
+    /// Returns the underlying BAI index, if this is a BAI index.
+    pub fn as_bai(&self) -> Option<&bai::Index> {
+        match self {
+            Self::Bai(index) => Some(index),
+            Self::Csi(_) => None,
+        }
+    }
+
+    /// Returns the underlying CSI index, if this is a CSI index.
+    pub fn as_csi(&self) -> Option<&csi::Index> {
+        match self {
+            Self::Bai(_) => None,
+            Self::Csi(index) => Some(index),
+        }
+    }
+}
+
 impl From<bai::Index> for Index {
     fn from(index: bai::Index) -> Self {
         Self::Bai(index)
@@ -161,5 +179,21 @@ mod tests {
 
         assert_eq!(actual.kind(), expected.kind());
         assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn gets_bai_index() {
+        let index = Index::Bai(bai::Index::default());
+
+        assert!(index.as_bai().is_some());
+        assert!(index.as_csi().is_none());
+    }
+
+    #[test]
+    fn gets_csi_index() {
+        let index = Index::Csi(csi::Index::default());
+
+        assert!(index.as_bai().is_none());
+        assert!(index.as_csi().is_some());
     }
 }
